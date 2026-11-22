@@ -454,9 +454,6 @@ class Neo4jKnowledgeGraph:
         for e in self.edges:
             if e.get("source") == person_id:
                 user_node_ids_to_remove.add(e.get("target"))
-        for e in self.edges:
-            if e.get("source") in user_node_ids_to_remove and e.get("type") in ["HAD_CHARGE", "HAS_CHARGE"]:
-                user_node_ids_to_remove.add(e.get("target"))
 
         self.nodes = [
             n for n in self.nodes 
@@ -721,8 +718,7 @@ class Neo4jKnowledgeGraph:
                             "id": c_hash,
                             "date": c_date,
                             "amount": float(amt_str),
-                            "descriptor": c_desc,
-                            "user_id": person_id
+                            "descriptor": c_desc
                         }
                     })
 
