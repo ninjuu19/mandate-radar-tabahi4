@@ -68,15 +68,6 @@ allowed_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()] 
     "*"
 ]
 
-# CORS configuration with environment variable override
-cors_origins_env = os.getenv("CORS_ORIGINS", "")
-allowed_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()] if cors_origins_env else [
-    "http://localhost:5173", "http://127.0.0.1:5173",
-    "http://localhost:3000", "http://127.0.0.1:3000",
-    "http://localhost:8000", "http://127.0.0.1:8000",
-    "https://mandate-radar-tabahi4.vercel.app"
-]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
