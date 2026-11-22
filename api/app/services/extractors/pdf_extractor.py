@@ -6,13 +6,16 @@ and mathematical balance verification.
 import io
 import re
 from typing import Optional, List, Dict, Any, Tuple
-import pypdf
+try:
+    import pypdf
+except ImportError:
+    pypdf = None
 from app.services.normalizer import parse_date, parse_amount, clean_descriptor, detect_rail
 
 class PDFExtractionError(Exception):
     pass
 
-def decrypt_pdf(reader: pypdf.PdfReader, password: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+def decrypt_pdf(reader: Any, password: Optional[str] = None) -> Tuple[bool, Optional[str]]:
     """Attempts to decrypt an encrypted PDF using provided password or standard empty/fallback."""
     if not reader.is_encrypted:
         return True, None
@@ -44,6 +47,8 @@ def extract_transactions_from_pdf(
     Parses bank statement PDF bytes into normalized transaction records.
     Stitches multi-line transaction narrations and verifies ledger balances.
     """
+    if pypdf is None:
+        raise PDFExtractionError("pypdf package is not installed on this server.")
     try:
         pdf_io = io.BytesIO(pdf_bytes)
         reader = pypdf.PdfReader(pdf_io)
