@@ -162,22 +162,12 @@ def register_user(request: Request, req: RegisterRequest, db: Session = Depends(
 def login_user(request: Request, req: LoginRequest, db: Session = Depends(get_db)):
     clean_email = req.email.strip().lower()
 
-    # Support login for demo account
+    # Block login for demo account via password form
     if clean_email == "arun.sharma@example.com":
-        user = db.query(User).filter(User.email == clean_email).first()
-        if not user:
-            from app.services.seed_service import seed_database
-            seed_database(db)
-            user = db.query(User).filter(User.email == clean_email).first()
-        if user and (not user.password_hash or verify_password(req.password, user.password_hash) or req.password in ["password123", "demo123", "password", "arun123"]):
-            token = create_access_token({"sub": user.id, "email": user.email})
-            return TokenResponse(
-                access_token=token,
-                user_id=user.id,
-                email=user.email,
-                full_name=user.full_name,
-                is_demo=True
-            )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Demo user is reserved. Please click 'Explore sample data' to view demo mode."
+        )
 
     user = db.query(User).filter(User.email == clean_email).first()
     if not user:

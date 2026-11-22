@@ -512,7 +512,8 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
         method: 'POST',
         body: formData
       })
-      const data = await readApiResponse<any>(res)
+
+      if (!ok || !data) throw new Error(error || 'Failed to analyze statement.')
 
       const uploadedMandates: Mandate[] = Array.isArray(data.mandates) ? data.mandates : []
       setLocalMandates(uploadedMandates)
@@ -782,9 +783,8 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
           query: 'MATCH (u:Person)-[r:HAS_MANDATE]->(m:Mandate)-[:FOR_VENDOR]->(v:Vendor) RETURN v.name AS Parent, collect(m.merchant_name) AS ActiveMerchants, sum(m.annual_committed_cost) AS AnnualCommittedSpend'
         })
       })
-      const data = await readApiResponse<any>(res)
-      const records = Array.isArray(data.data) ? data.data : []
-      if (data.status === 'SUCCESS' && records.length > 0) {
+      const records = Array.isArray(data?.data) ? data.data : (Array.isArray(data?.records) ? data.records : [])
+      if (ok && data && (data.status === 'SUCCESS' || records.length > 0)) {
         setCypherResult({
           summary: `Neo4j returned ${records.length} graph records (${data.mode || 'graph engine'}).`,
           results: records.map((record: any) => ({
