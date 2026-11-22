@@ -3,6 +3,13 @@ Mandate Radar FastAPI Backend Server
 Track: Neo4j (Best Use of Neo4j) - Fintech Track Solution
 """
 
+import sys
+import os
+
+_backend_dir = os.path.dirname(os.path.abspath(__file__))
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
+
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles

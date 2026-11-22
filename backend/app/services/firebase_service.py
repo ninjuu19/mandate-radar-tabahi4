@@ -3,15 +3,23 @@ Firebase Admin Auth Integration for Phone Authentication
 Strictly verifies Firebase ID tokens emitted by Firebase Phone Auth.
 """
 import os
-import firebase_admin
-from firebase_admin import credentials, auth as firebase_auth
 from typing import Optional, Dict, Any
 from app.core.config import settings
+
+try:
+    import firebase_admin
+    from firebase_admin import credentials, auth as firebase_auth
+except ImportError:
+    firebase_admin = None
+    credentials = None
+    firebase_auth = None
 
 _firebase_initialized = False
 
 def ensure_firebase_initialized():
     global _firebase_initialized
+    if not firebase_admin:
+        return
     if not _firebase_initialized:
         svc_account = settings.FIREBASE_SERVICE_ACCOUNT
         if svc_account and os.path.exists(svc_account):
@@ -31,5 +39,7 @@ def verify_firebase_id_token(id_token_str: str) -> Dict[str, Any]:
     Verifies Firebase ID token and extracts verified claims.
     Raises ValueError / AuthError if token is invalid or expired.
     """
+    if not firebase_admin or not firebase_auth:
+        raise ValueError("Firebase Admin SDK is not installed or configured.")
     ensure_firebase_initialized()
     return firebase_auth.verify_id_token(id_token_str)
