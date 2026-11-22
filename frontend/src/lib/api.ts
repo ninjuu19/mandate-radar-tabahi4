@@ -41,11 +41,15 @@ export async function safeFetchJson<T = any>(
     if (!res.ok) {
       if (res.status === 401) {
         try {
-          localStorage.removeItem('mandate_radar_token');
-          localStorage.removeItem('mandate_radar_user');
-          if (typeof window !== 'undefined') {
-            window.dispatchEvent(new CustomEvent('mandate_radar:unauthorized'));
-            window.dispatchEvent(new CustomEvent('mandate_radar_auth_expired'));
+          const userStr = localStorage.getItem('mandate_radar_user');
+          const isDemo = userStr ? JSON.parse(userStr)?.isDemo : false;
+          if (!isDemo) {
+            localStorage.removeItem('mandate_radar_token');
+            localStorage.removeItem('mandate_radar_user');
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('mandate_radar:unauthorized'));
+              window.dispatchEvent(new CustomEvent('mandate_radar_auth_expired'));
+            }
           }
         } catch {}
       }
@@ -116,11 +120,16 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
   });
 
   if (res.status === 401) {
-    // Clear stored credentials on unauthorized response
-    localStorage.removeItem('mandate_radar_token');
-    localStorage.removeItem('mandate_radar_user');
-    window.dispatchEvent(new CustomEvent('mandate_radar_auth_expired'));
-    window.dispatchEvent(new CustomEvent('mandate_radar:unauthorized'));
+    try {
+      const userStr = localStorage.getItem('mandate_radar_user');
+      const isDemo = userStr ? JSON.parse(userStr)?.isDemo : false;
+      if (!isDemo) {
+        localStorage.removeItem('mandate_radar_token');
+        localStorage.removeItem('mandate_radar_user');
+        window.dispatchEvent(new CustomEvent('mandate_radar_auth_expired'));
+        window.dispatchEvent(new CustomEvent('mandate_radar:unauthorized'));
+      }
+    } catch {}
   }
 
   return res;

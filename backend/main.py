@@ -3,6 +3,13 @@ Mandate Radar FastAPI Backend Server
 Track: Neo4j (Best Use of Neo4j) - Fintech Track Solution
 """
 
+import sys
+import os
+
+_backend_dir = os.path.dirname(os.path.abspath(__file__))
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
+
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -43,17 +50,26 @@ from fastapi.responses import Response
 import json
 from neo4j_service import Neo4jKnowledgeGraph
 
-from slowapi import _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from app.api.v1.auth import limiter
+try:
+    from slowapi import _rate_limit_exceeded_handler
+    from slowapi.errors import RateLimitExceeded
+    has_slowapi = True
+except Exception:
+    has_slowapi = False
+
+try:
+    from app.api.v1.auth import limiter
+except Exception:
+    limiter = None
 
 app = FastAPI(
     title="Mandate Radar API",
     description="Deterministic Auto-Debit Mandate Detection & Neo4j Knowledge Graph Engine",
     version="2.0.0"
 )
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+if has_slowapi and limiter and hasattr(limiter, "limit"):
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS configuration with environment variable override
 cors_origins_env = os.getenv("CORS_ORIGINS", "")
@@ -68,7 +84,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
 )
 

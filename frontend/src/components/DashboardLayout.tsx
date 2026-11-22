@@ -55,6 +55,28 @@ export type DashboardTab =
   | 'neo4j'
   | 'profile'
 
+async function readApiResponse<T>(response: Response): Promise<T> {
+  let data: any
+  try {
+    data = await response.json()
+  } catch {
+    throw new Error('The server returned an invalid response.')
+  }
+
+  if (!response.ok) {
+    const detail = data?.detail
+    throw new Error(
+      typeof detail === 'string'
+        ? detail
+        : detail
+          ? JSON.stringify(detail)
+          : `Request failed with status ${response.status}.`
+    )
+  }
+
+  return data as T
+}
+
 interface DashboardLayoutProps {
   user?: {
     id: string
@@ -104,8 +126,44 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
   const [selectedMandate, setSelectedMandate] = useState<Mandate | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [cypherResult, setCypherResult] = useState<any>(null)
+  const [neo4jGraphData, setNeo4jGraphData] = useState<{ nodes: GraphNode[]; edges: GraphEdge[]; stats: any } | null>(null)
+  const [isLoadingGraph, setIsLoadingGraph] = useState(false)
+  const [graphError, setGraphError] = useState<string | null>(null)
   const [graphMode, setGraphMode] = useState<string>('portfolio')
   const [statementTxnCount, setStatementTxnCount] = useState<number>(0)
+  const [userName, setUserName] = useState(user?.name || 'Rahul Sharma')
+  const [userEmail, setUserEmail] = useState(user?.email || 'rahul.sharma@example.com')
+  const [userPhone, setUserPhone] = useState(user?.phone || '+91 98201 48210')
+  const [userCity, setUserCity] = useState('Bengaluru, Karnataka')
+  const [primaryBank, setPrimaryBank] = useState(user?.accountLabel || 'HDFC Bank (Salary A/C •••• 4821)')
+  const [autoZombieAlert, setAutoZombieAlert] = useState(true)
+  const [autoHikeAlert, setAutoHikeAlert] = useState(true)
+  const [trialWarningAlert, setTrialWarningAlert] = useState(true)
+  const [whatsappAlerts, setWhatsappAlerts] = useState(true)
+  const [profileSavedToast, setProfileSavedToast] = useState(false)
+
+  const loadNeo4jGraph = React.useCallback(async () => {
+    setIsLoadingGraph(true)
+    setGraphError(null)
+    try {
+      const response = await apiFetch('/api/graph?mode=portfolio')
+      const data = await readApiResponse<{ nodes: GraphNode[]; edges: GraphEdge[]; stats: any }>(response)
+      if (!Array.isArray(data.nodes) || !Array.isArray(data.edges)) {
+        throw new Error('The graph response is missing nodes or relationships.')
+      }
+      setNeo4jGraphData(data)
+    } catch (err) {
+      setGraphError(err instanceof Error ? err.message : 'Unable to load the Neo4j graph.')
+    } finally {
+      setIsLoadingGraph(false)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    if (activeTab === 'graph') {
+      void loadNeo4jGraph()
+    }
+  }, [activeTab, loadNeo4jGraph])
 
   // Local active mandates state so updates reflect immediately
   const [localMandates, setLocalMandates] = useState<Mandate[]>(mandates)
@@ -312,16 +370,6 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
 
   // Active User Context
   const userId = user?.id || 'usr_primary'
-  const [userName, setUserName] = useState(user?.name || 'Rahul Sharma')
-  const [userEmail, setUserEmail] = useState(user?.email || 'rahul.sharma@example.com')
-  const [userPhone, setUserPhone] = useState(user?.phone || '+91 98201 48210')
-  const [userCity, setUserCity] = useState('Bengaluru, Karnataka')
-  const [primaryBank, setPrimaryBank] = useState(user?.accountLabel || 'HDFC Bank (Salary A/C •••• 4821)')
-  const [autoZombieAlert, setAutoZombieAlert] = useState(true)
-  const [autoHikeAlert, setAutoHikeAlert] = useState(true)
-  const [trialWarningAlert, setTrialWarningAlert] = useState(true)
-  const [whatsappAlerts, setWhatsappAlerts] = useState(true)
-  const [profileSavedToast, setProfileSavedToast] = useState(false)
 
   React.useEffect(() => {
     if (user?.name) setUserName(user.name)
@@ -464,29 +512,31 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
         method: 'POST',
         body: formData
       })
+      const data = await readApiResponse<any>(res)
 
-      if (!ok || !data) throw new Error(error || 'Failed to analyze statement.')
+      const uploadedMandates: Mandate[] = Array.isArray(data.mandates) ? data.mandates : []
+      setLocalMandates(uploadedMandates)
+      onUpdateMandates?.(uploadedMandates)
+      setStatementTxnCount(data.rows_parsed || uploadedMandates.reduce((acc, m) => acc + (m.charge_count || 1), 0))
 
-      if (data.mandates && data.mandates.length > 0) {
-        setLocalMandates(data.mandates)
-        onUpdateMandates?.(data.mandates)
-        const txnCount = data.rows_parsed || data.metrics?.total_transactions || data.mandates.reduce((acc: number, m: Mandate) => acc + (m.charge_count || 1), 0)
-        setStatementTxnCount(txnCount)
-        const totalAnnual = data.mandates.reduce((acc: number, m: Mandate) => acc + (m.annual_committed_cost || 0), 0)
-        const flaggedCount = data.mandates.filter((m: Mandate) => m.flags && m.flags.length > 0).length
-        const potentialSavings = data.mandates.filter((m: Mandate) => m.flags?.includes('unused') || m.flags?.includes('price_creep') || m.flags?.includes('trial_trap')).reduce((acc: number, m: Mandate) => acc + (m.annual_committed_cost || 0), 0)
+      if (data.hero_metrics) {
+        onUpdateHeroMetrics?.(data.hero_metrics)
+      } else {
+        const totalAnnual = uploadedMandates.reduce((acc, m) => acc + (m.annual_committed_cost || 0), 0)
         onUpdateHeroMetrics?.({
           annual_committed_total: totalAnnual,
           monthly_equivalent: Math.round(totalAnnual / 12),
-          potential_savings: potentialSavings,
-          total_mandates_found: data.mandates.length,
-          flagged_issues_count: flaggedCount
+          potential_savings: data.annual_potential_savings || 0,
+          total_mandates_found: uploadedMandates.length,
+          flagged_issues_count: uploadedMandates.filter(m => m.flag && m.flag !== 'HEALTHY').length
         })
       }
 
       if (data.findings && data.findings.length > 0) {
         setFindings(data.findings)
         setIsFindingsModalOpen(true)
+      } else {
+        setFindings([])
       }
 
       if (data.reconciliation) {
@@ -502,6 +552,7 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
       setUploadMessage(
         `Successfully analyzed statement: ${data.mandates_found || data.mandates?.length || 0} recurring charges mapped from "${uploadAccountLabel}".`
       )
+      await loadNeo4jGraph()
     } catch (err: any) {
       console.warn('Backend upload notice:', err)
       const text = await file.text()
@@ -692,7 +743,7 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
         setIsFindingsModalOpen(true)
         setUploadMessage(`Following statement analyzed: SUCCESS! Zero charges detected for YouTube Music. Cancellation verified.`)
       } else {
-        setUploadMessage(`Processed statement for "${uploadAccountLabel}". Synced with Neo4j graph engine.`)
+        setUploadError(err instanceof Error ? err.message : 'Unable to read this CSV file.')
       }
     } finally {
       setIsUploading(false)
@@ -731,10 +782,16 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
           query: 'MATCH (u:Person)-[r:HAS_MANDATE]->(m:Mandate)-[:FOR_VENDOR]->(v:Vendor) RETURN v.name AS Parent, collect(m.merchant_name) AS ActiveMerchants, sum(m.annual_committed_cost) AS AnnualCommittedSpend'
         })
       })
-      if (ok && data?.records && data.records.length > 0) {
+      const data = await readApiResponse<any>(res)
+      const records = Array.isArray(data.data) ? data.data : []
+      if (data.status === 'SUCCESS' && records.length > 0) {
         setCypherResult({
-          summary: `Matched ${localMandates.length} recurring mandates against ${data.records.length} parent corporate entities in Neo4j.`,
-          results: data.records
+          summary: `Neo4j returned ${records.length} graph records (${data.mode || 'graph engine'}).`,
+          results: records.map((record: any) => ({
+            Parent: record.Parent || record.parent || record.parent_name || 'Merchant group',
+            ActiveMerchants: record.ActiveMerchants || record.merchants || [],
+            AnnualCommittedSpend: record.AnnualCommittedSpend || record.annual_committed_spend || 0
+          }))
         })
         return
       }
@@ -1147,7 +1204,7 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
                   <h2 className="text-lg font-bold text-[#0F1713] flex items-center gap-2">
                     <span>Interactive Neo4j Graph Engine</span>
                     <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-[#C6F6D5] text-[#0B2417] font-semibold">
-                      Live Topology
+                      Graph Snapshot
                     </span>
                   </h2>
                   <p className="text-xs text-[#64756B] mt-0.5">
@@ -1155,24 +1212,58 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
                   </p>
                 </div>
 
-                <button
-                  onClick={runCypher}
-                  className="px-3.5 py-1.5 rounded-xl bg-[#0E2419] text-[#2DE2B5] font-mono text-xs font-semibold flex items-center gap-1.5 hover:bg-[#163826] transition-colors cursor-pointer shadow-sm border border-[#2DE2B5]/30 self-start sm:self-auto"
-                  title="Executes Cypher query on Neo4j Aura to aggregate merchants by parent corporate entities"
-                >
-                  <Sparkles className="w-3.5 h-3.5 text-[#2DE2B5]" />
-                  <span>Run Neo4j Cypher Rollup</span>
-                </button>
+                <div className="flex items-center gap-2 self-start sm:self-auto">
+                  <button
+                    onClick={() => void loadNeo4jGraph()}
+                    disabled={isLoadingGraph}
+                    className="px-3.5 py-1.5 rounded-xl bg-white text-[#0E2419] font-mono text-xs font-semibold flex items-center gap-1.5 hover:bg-[#F2EDE2] transition-colors cursor-pointer shadow-sm border border-[#E8E1D2] disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isLoadingGraph ? 'animate-spin' : ''}`} />
+                    <span>Refresh Graph</span>
+                  </button>
+                  <button
+                    onClick={runCypher}
+                    className="px-3.5 py-1.5 rounded-xl bg-[#0E2419] text-[#2DE2B5] font-mono text-xs font-semibold flex items-center gap-1.5 hover:bg-[#163826] transition-colors cursor-pointer shadow-sm border border-[#2DE2B5]/30"
+                    title="Run a read-only graph rollup"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-[#2DE2B5]" />
+                    <span>Run Neo4j Cypher Rollup</span>
+                  </button>
+                </div>
               </div>
 
               <div className="h-[580px] bg-[#0A100D] border border-[#E8E1D2] rounded-3xl overflow-hidden relative shadow-xl">
-                <GraphCanvas
-                  nodes={dynamicGraph.nodes}
-                  edges={dynamicGraph.edges}
-                  currentMode={graphMode}
-                  onModeChange={setGraphMode}
-                  onNodeClick={() => {}}
-                />
+                {graphError && (
+                  <div className="absolute inset-x-4 top-4 z-10 rounded-xl border border-red-400/40 bg-red-950/90 px-4 py-3 text-xs text-red-100">
+                    Could not load the Neo4j graph: {graphError}
+                  </div>
+                )}
+                {isLoadingGraph && !neo4jGraphData && (
+                  <div className="absolute inset-0 flex items-center justify-center text-sm text-[#BAC8BF]">
+                    Loading your Neo4j graph…
+                  </div>
+                )}
+                {neo4jGraphData && neo4jGraphData.nodes.length === 0 && !isLoadingGraph && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-center text-[#BAC8BF]">
+                    <Network className="h-8 w-8 text-[#2DE2B5]" />
+                    <p className="text-sm">No statement data is in this graph yet.</p>
+                    <button
+                      onClick={() => setActiveTab('upload')}
+                      className="rounded-xl border border-[#2DE2B5]/40 px-3 py-2 text-xs font-semibold text-[#2DE2B5] hover:bg-[#163826]"
+                    >
+                      Upload a CSV statement
+                    </button>
+                  </div>
+                )}
+                {neo4jGraphData?.nodes.length || (!neo4jGraphData && !isLoadingGraph && !graphError) ? (
+                  <GraphCanvas
+                    nodes={neo4jGraphData?.nodes || dynamicGraph.nodes}
+                    edges={neo4jGraphData?.edges || dynamicGraph.edges}
+                    currentMode={graphMode}
+                    onModeChange={setGraphMode}
+                    onNodeClick={() => {}}
+                  />
+                ) : null}
               </div>
 
               {cypherResult && (
@@ -1242,13 +1333,19 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".csv"
+                accept=".csv,.txt,.tsv,text/csv,text/tab-separated-values"
                 onChange={handleFileUpload}
                 className="hidden"
               />
 
               {/* Drag & Drop Upload Target */}
               <div
+                onDragOver={e => e.preventDefault()}
+                onDrop={e => {
+                  e.preventDefault()
+                  const file = e.dataTransfer.files[0]
+                  if (file) void processStatementFile(file)
+                }}
                 onClick={() => fileInputRef.current?.click()}
                 className="p-10 rounded-3xl border-2 border-dashed border-[#D8CEBC] hover:border-[#0E2419] bg-white text-center space-y-4 transition-colors cursor-pointer group shadow-sm"
               >
