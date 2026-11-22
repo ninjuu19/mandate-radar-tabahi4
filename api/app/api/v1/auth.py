@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Header, Request
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from typing import Optional, Dict, Any
 import os
 import re
@@ -32,8 +32,10 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 OTP_CACHE: Dict[str, Dict[str, Any]] = {}
 
+EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
 class RegisterRequest(BaseModel):
-    email: EmailStr
+    email: str
     password: str
     full_name: str
 
@@ -74,6 +76,19 @@ class TokenResponse(BaseModel):
 @limiter.limit("5/minute")
 def register_user(request: Request, req: RegisterRequest, db: Session = Depends(get_db)):
     clean_email = req.email.strip().lower()
+
+    # Block registration for demo account
+    if clean_email == "arun.sharma@example.com":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Demo account arun.sharma@example.com cannot be registered. Use 'Explore sample data' to view demo mode."
+        )
+
+    if not clean_email or not EMAIL_REGEX.match(clean_email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid email format."
+        )
     
     # Password complexity check (minimum 8 characters)
     if len(req.password) < 8:
@@ -85,6 +100,11 @@ def register_user(request: Request, req: RegisterRequest, db: Session = Depends(
     # Check if user already exists
     existing_user = db.query(User).filter(User.email == clean_email).first()
     if existing_user:
+        if existing_user.password_hash == "GOOGLE_OAUTH_VERIFIED":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This email was registered using Google Sign-In. Please sign in with Google."
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="A user with this email address already exists."

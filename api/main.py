@@ -41,30 +41,63 @@ from neo4j_service import Neo4jKnowledgeGraph
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from app.api.v1.auth import limiter
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
+from fastapi import Request, Response
+
+is_debug = os.getenv("DEBUG", "false").lower() == "true"
 
 app = FastAPI(
     title="Mandate Radar API",
     description="Deterministic Auto-Debit Mandate Detection & Neo4j Knowledge Graph Engine",
-    version="2.0.0"
+    version="2.0.0",
+    debug=is_debug,
+    docs_url="/docs" if is_debug else None,
+    redoc_url=None,
+    openapi_url="/openapi.json" if is_debug else None
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# CORS configuration with environment variable override
+# Custom Security Headers Middleware (OWASP recommended defense-in-depth)
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response: Response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' https://accounts.google.com https://apis.google.com https://www.google.com https://www.gstatic.com; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com data:; "
+            "img-src 'self' data: https://cdn.simpleicons.org https://*.googleusercontent.com https://*.gstatic.com; "
+            "connect-src 'self' https://mandate-f2fea.firebaseapp.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://*.databases.neo4j.io https://*.vercel.app; "
+            "frame-src https://accounts.google.com https://mandate-f2fea.firebaseapp.com;"
+        )
+        return response
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+# CORS configuration with environment variable override and strict origin whitelist (no wildcard with credentials)
 cors_origins_env = os.getenv("CORS_ORIGINS", "")
 allowed_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()] if cors_origins_env else [
     "http://localhost:5173", "http://127.0.0.1:5173",
     "http://localhost:3000", "http://127.0.0.1:3000",
     "http://localhost:8000", "http://127.0.0.1:8000",
-    "*"
+    "https://mandate-radar-tabahi4.vercel.app"
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
+    allow_origin_regex=r"^https://.*\.vercel\.app$",
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "X-Requested-With"],
 )
 
 # Initialize Relational Database & Mount API v1
