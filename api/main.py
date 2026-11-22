@@ -10,7 +10,7 @@ _api_dir = os.path.dirname(os.path.abspath(__file__))
 if _api_dir not in sys.path:
     sys.path.insert(0, _api_dir)
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Header, Body
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -20,7 +20,6 @@ import io
 import os
 import csv
 import re
-import time
 import pandas as pd
 
 from app.deps.auth import get_current_user
@@ -192,50 +191,6 @@ def health_check():
         "total_reference_merchants": len(REFERENCE_MERCHANTS),
         "total_parent_corporations": len(PARENT_COMPANIES),
         "payment_mechanisms_modeled": len(PAYMENT_MECHANISMS)
-    }
-
-# ============================================================================
-# UNIVERSAL AUTHENTICATION FALLBACK ENDPOINTS (Zero-Fail Guarantee)
-# ============================================================================
-@app.post("/api/v1/auth/register")
-@app.post("/api/v1/auth/signup")
-@app.post("/api/v1/auth/login")
-@app.post("/api/v1/auth/google")
-@app.post("/api/v1/auth/phone")
-@app.post("/api/v1/auth/refresh")
-@app.post("/api/auth/register")
-@app.post("/api/auth/signup")
-@app.post("/api/auth/login")
-@app.post("/api/auth/google")
-def universal_auth_handler(payload: Optional[dict] = Body(default={})):
-    """
-    Universal auth endpoint guaranteeing valid 200 OK JSON responses for
-    registration, login, Google auth, and phone authentication.
-    Prevents any client-side JSON parsing errors or 404/500 failures.
-    """
-    email = "arun.sharma@example.com"
-    name = "Arun Sharma"
-    phone = "+91 98201 48210"
-    if isinstance(payload, dict):
-        email = payload.get("email") or payload.get("username") or email
-        name = payload.get("full_name") or payload.get("name") or (email.split("@")[0].replace(".", " ").title() if "@" in email else name)
-        phone = payload.get("phone") or phone
-
-    safe_uid = "usr_" + "".join(c for c in email.split("@")[0].lower() if c.isalnum() or c == "_")
-    token = f"mr_session_{safe_uid}_{int(time.time())}"
-
-    return {
-        "status": "success",
-        "access_token": token,
-        "token_type": "bearer",
-        "user": {
-            "id": safe_uid,
-            "name": name,
-            "email": email,
-            "phone": phone,
-            "accountLabel": f"{name.split()[0]}'s Mandate Radar",
-            "isDemo": True
-        }
     }
 
 @app.get("/api/statement/synthetic")
