@@ -123,10 +123,32 @@ def test_graph_analytics_logic():
     print("  Portfolio Vulnerability & Friction Scoring: OK")
 
 def test_analytics_api_endpoints():
+    from app.core.db import SessionLocal
+    from app.models.user import User
+    from app.services.auth_service import create_access_token
+
     print("Testing Stage 8 Analytics API Endpoints...")
     
+    # 0. Unauthenticated access returns 401
+    unauth_r1 = client.get("/api/v1/analytics/upcoming-debits?days=30")
+    assert unauth_r1.status_code == 401
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).first()
+        if not user:
+            user = User(id="stage8_user", email="stage8@example.com", password_hash="test", full_name="Stage 8 User")
+            db.add(user)
+            db.commit()
+        user_id = user.id
+    finally:
+        db.close()
+
+    token = create_access_token({"sub": user_id})
+    headers = {"Authorization": f"Bearer {token}"}
+
     # 1. Upcoming Debits
-    r1 = client.get("/api/v1/analytics/upcoming-debits?days=30")
+    r1 = client.get("/api/v1/analytics/upcoming-debits?days=30", headers=headers)
     assert r1.status_code == 200
     d1 = r1.json()
     assert "schedule" in d1
@@ -134,7 +156,7 @@ def test_analytics_api_endpoints():
     print("  GET /api/v1/analytics/upcoming-debits: OK")
 
     # 2. Cashflow Forecast
-    r2 = client.get("/api/v1/analytics/cashflow-forecast?days=30&balance=50000")
+    r2 = client.get("/api/v1/analytics/cashflow-forecast?days=30&balance=50000", headers=headers)
     assert r2.status_code == 200
     d2 = r2.json()
     assert "starting_balance" in d2
@@ -143,7 +165,7 @@ def test_analytics_api_endpoints():
     print("  GET /api/v1/analytics/cashflow-forecast: OK")
 
     # 3. Corporate Footprint
-    r3 = client.get("/api/v1/analytics/corporate-footprint")
+    r3 = client.get("/api/v1/analytics/corporate-footprint", headers=headers)
     assert r3.status_code == 200
     d3 = r3.json()
     assert "footprint" in d3

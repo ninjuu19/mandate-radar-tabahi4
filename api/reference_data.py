@@ -127,6 +127,12 @@ REFERENCE_MERCHANTS = [
         "default_amount": 299.0,
         "supported_cadences": ["MONTHLY", "QUARTERLY", "ANNUAL"],
         "descriptors": [
+            r"\bAMZN\b",
+            r"\bAMAZON\b",
+            r"AMZN\*",
+            r"AMAZON\s+PAY",
+            r"AMZN\s+PAY",
+            r"AMAZON\.IN",
             r"AMZN\s+PRIME\s+IN\*\d+",
             r"AMAZON\s+PRIME\s+MEMBER",
             r"AMZN\*PRIME\s+RECURRING",
@@ -275,12 +281,14 @@ REFERENCE_MERCHANTS = [
         "default_amount": 499.0,
         "supported_cadences": ["MONTHLY"],
         "descriptors": [
+            r"\bNETFLIX\b",
             r"NETFLIX\.COM\s+NETFLIX\s+ENTERTAINMENT",
             r"NETFLIX\s+ENTERTAINMENT\s+SVCS",
             r"UPI/CR/\d+/NETFLIX/AUTOPAY",
             r"NETFLIX\s+INDIA\s+MUMBAI",
+            r"\bNETFLIX(\s+INDIA)?\b",
             r"POS\s+DEBIT\s+NETFLIX\.COM",
-            r"NETFLIX\s+SUBSCRIPTION\s+MUM"
+            r"NETFLIX\s+SUBSCRIPTION"
         ],
         "default_mechanism": "CARD_SI",
         "support_email": "info@netflix.com",
@@ -300,17 +308,231 @@ REFERENCE_MERCHANTS = [
         "default_amount": 119.0,
         "supported_cadences": ["MONTHLY", "ANNUAL", "QUARTERLY"],
         "descriptors": [
+            r"\bSPOTIFY\b",
             r"SPOTIFY\s+INDIA\s+MUMBAI",
             r"SPOTIFY\*PREMIUM\s+IN",
             r"UPI/CR/\d+/SPOTIFY/PREMIUM",
             r"PAYTM\*SPOTIFY\s+MANDATE",
             r"SPOTIFY\s+AB\s+STOCKHOLM",
+            r"\bSPOTIFY(\s+INDIA)?\b",
             r"POS\s+SPOTIFY\s+INDIA"
         ],
         "default_mechanism": "UPI_AUTOPAY",
         "support_email": "support@spotify.com",
         "grievance_email": "grievance-india@spotify.com",
         "cancellation_pitfall": "If subscribed through Apple App Store or Google Play, you cannot cancel from Spotify website. You must revoke via Apple/Google subscriptions."
+    },
+
+    # CloudStore
+    {
+        "id": "cloudstore",
+        "name": "CloudStore",
+        "category": "Cloud & Software",
+        "parent": "CloudStore Inc.",
+        "parent_id": "cloudstore",
+        "official_website": "https://cloudstore.com",
+        "logo": "https://cdn.simpleicons.org/icloud/007AFF",
+        "supported_cadences": ["MONTHLY", "ANNUAL"],
+        "default_billing_type": "fixed",
+        "descriptors": [
+            r"\bCLOUD\s*STORE\b",
+            r"\bCLOUDSTORE\b"
+        ],
+        "default_mechanism": "UPI_AUTOPAY",
+        "support_email": "support@cloudstore.com",
+        "grievance_email": "grievance@cloudstore.com",
+        "cancellation_pitfall": "Data deletion grace window is 14 days after cancellation."
+    },
+
+    # DomainHost
+    {
+        "id": "domainhost",
+        "name": "DomainHost",
+        "category": "Domain & Hosting",
+        "parent": "DomainHost Inc.",
+        "parent_id": "domainhost",
+        "official_website": "https://domainhost.com",
+        "logo": "https://cdn.simpleicons.org/godaddy/1BDBDB",
+        "supported_cadences": ["ANNUAL"],
+        "default_billing_type": "fixed",
+        "descriptors": [
+            r"\bDOMAIN\s*HOST\b",
+            r"\bDOMAINHOST\b"
+        ],
+        "default_mechanism": "CARD_SI",
+        "support_email": "support@domainhost.com",
+        "grievance_email": "grievance@domainhost.com",
+        "cancellation_pitfall": "Annual renewal is billed 30 days before expiration date."
+    },
+
+    # InsureCo Health
+    {
+        "id": "insureco",
+        "name": "InsureCo Health",
+        "category": "Health Insurance",
+        "parent": "InsureCo General Insurance Ltd.",
+        "parent_id": "insureco",
+        "official_website": "https://insureco.in",
+        "logo": "https://cdn.simpleicons.org/shield/00A86B",
+        "supported_cadences": ["MONTHLY", "ANNUAL"],
+        "default_billing_type": "fixed",
+        "descriptors": [
+            r"\bINSURECO\b",
+            r"\bINSURECO\s+HEALTH\b"
+        ],
+        "default_mechanism": "BANK_NACH",
+        "support_email": "support@insureco.in",
+        "grievance_email": "grievance@insureco.in",
+        "cancellation_pitfall": "Policy cancellation requires 15 days advance notice under IRDAI guidelines."
+    },
+
+    # MilkDaily
+    {
+        "id": "milkdaily",
+        "name": "MilkDaily",
+        "category": "Groceries & Essentials",
+        "parent": "DailyDairy Foods Pvt Ltd",
+        "parent_id": "milkdaily",
+        "official_website": "https://milkdaily.in",
+        "logo": "https://cdn.simpleicons.org/instacart/43B02A",
+        "supported_cadences": ["WEEKLY", "MONTHLY"],
+        "default_billing_type": "fixed",
+        "descriptors": [
+            r"\bMILK\s*DAILY\b",
+            r"\bMILKDAILY\b"
+        ],
+        "default_mechanism": "UPI_AUTOPAY",
+        "support_email": "care@milkdaily.in",
+        "grievance_email": "grievance@milkdaily.in",
+        "cancellation_pitfall": "Auto-debit pause takes effect next delivery cycle (24h lead time)."
+    },
+
+    # StreamPlus
+    {
+        "id": "streamplus",
+        "name": "StreamPlus",
+        "category": "OTT & Entertainment",
+        "parent": "StreamPlus Media Ltd.",
+        "parent_id": "streamplus",
+        "official_website": "https://streamplus.com",
+        "logo": "https://cdn.simpleicons.org/youtube/FF0000",
+        "supported_cadences": ["MONTHLY", "ANNUAL"],
+        "default_billing_type": "fixed",
+        "descriptors": [
+            r"\bSTREAM\s*PLUS\b",
+            r"\bSTREAMPLUS\b"
+        ],
+        "default_mechanism": "CARD_SI",
+        "support_email": "support@streamplus.com",
+        "grievance_email": "grievance@streamplus.com",
+        "cancellation_pitfall": "Billing cycle continues until end of paid monthly term."
+    },
+
+    # GymPro
+    {
+        "id": "gympro",
+        "name": "GymPro",
+        "category": "Fitness & Health",
+        "parent": "GymPro Wellness Pvt Ltd",
+        "parent_id": "gympro",
+        "official_website": "https://gympro.in",
+        "logo": "https://cdn.simpleicons.org/strava/FC6100",
+        "supported_cadences": ["MONTHLY", "ANNUAL"],
+        "default_billing_type": "fixed",
+        "descriptors": [
+            r"\bGYMPRO\b",
+            r"\bGYM\s*PRO\b"
+        ],
+        "default_mechanism": "BANK_NACH",
+        "support_email": "help@gympro.in",
+        "grievance_email": "grievance@gympro.in",
+        "cancellation_pitfall": "Requires in-app mandate revocation 7 days prior to debit."
+    },
+
+    # FitFam
+    {
+        "id": "fitfam",
+        "name": "FitFam",
+        "category": "Fitness & Health",
+        "parent": "FitFam India Pvt Ltd",
+        "parent_id": "fitfam",
+        "official_website": "https://fitfam.in",
+        "logo": "https://cdn.simpleicons.org/fitbit/00B0B9",
+        "supported_cadences": ["MONTHLY"],
+        "default_billing_type": "fixed",
+        "descriptors": [
+            r"\bFITFAM\b",
+            r"\bFIT\s*FAM\b"
+        ],
+        "default_mechanism": "UPI_AUTOPAY",
+        "support_email": "contact@fitfam.in",
+        "grievance_email": "grievance@fitfam.in",
+        "cancellation_pitfall": "Cancel directly from your UPI app (Google Pay / PhonePe / Paytm)."
+    },
+
+    # LIC Premium
+    {
+        "id": "lic_india",
+        "name": "LIC Premium",
+        "category": "Life Insurance",
+        "parent": "Life Insurance Corporation of India",
+        "parent_id": "lic",
+        "official_website": "https://licindia.in",
+        "logo": "https://cdn.simpleicons.org/shield/003366",
+        "supported_cadences": ["QUARTERLY", "ANNUAL", "MONTHLY"],
+        "default_billing_type": "fixed",
+        "descriptors": [
+            r"\bLIC\s+PREMIUM\b",
+            r"\bLIC\s+OF\s+INDIA\b",
+            r"\bLIC\b"
+        ],
+        "default_mechanism": "BANK_NACH",
+        "support_email": "bo_lic@licindia.com",
+        "grievance_email": "co_crm@licindia.com",
+        "cancellation_pitfall": "Policy lapse occurs if NACH is stopped without alternative payment mode."
+    },
+
+    # ElectricityCo
+    {
+        "id": "electricityco",
+        "name": "ElectricityCo",
+        "category": "Power & Utilities",
+        "parent": "Electricity Utility Corp",
+        "parent_id": "electricityco",
+        "official_website": "https://electricityco.in",
+        "logo": "https://cdn.simpleicons.org/lightning/FFCC00",
+        "supported_cadences": ["MONTHLY"],
+        "default_billing_type": "usage_based",
+        "descriptors": [
+            r"\bELECTRICITYCO\b",
+            r"\bELECTRICITY\s*CO\b",
+            r"\bELECTRICITY\b"
+        ],
+        "default_mechanism": "BANK_NACH",
+        "support_email": "care@electricityco.in",
+        "grievance_email": "grievance@electricityco.in",
+        "cancellation_pitfall": "Utility auto-pay cancellation does not stop power supply obligation."
+    },
+
+    # OldAppSub
+    {
+        "id": "oldappsub",
+        "name": "OldAppSub",
+        "category": "Software & Utilities",
+        "parent": "OldAppSub Inc.",
+        "parent_id": "oldappsub",
+        "official_website": "https://oldappsub.com",
+        "logo": "https://cdn.simpleicons.org/appstore/007AFF",
+        "supported_cadences": ["MONTHLY"],
+        "default_billing_type": "fixed",
+        "descriptors": [
+            r"\bOLDAPPSUB\b",
+            r"\bOLD\s*APP\s*SUB\b"
+        ],
+        "default_mechanism": "BANK_NACH",
+        "support_email": "support@oldappsub.com",
+        "grievance_email": "grievance@oldappsub.com",
+        "cancellation_pitfall": "Small legacy recurring charges often forgotten by subscribers."
     },
 
     # The Walt Disney Company / Star India

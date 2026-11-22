@@ -12,6 +12,7 @@ import {
   Loader2,
   AlertCircle
 } from 'lucide-react'
+import { safeFetchJson } from '../lib/api'
 
 export type AuthState = 'default' | 'focused' | 'loading' | 'error' | 'phone_entry' | 'otp' | 'signup' | 'google'
 
@@ -20,27 +21,6 @@ interface AuthCardProps {
   onSuccess?: (user?: { name: string; email: string; phone?: string; isDemo?: boolean }) => void
   onTrySampleData?: () => void
   onOpenDesignSystem?: () => void
-}
-
-async function safeFetchJson<T = any>(
-  input: RequestInfo | URL,
-  init?: RequestInit
-): Promise<{ ok: boolean; status: number; data: T | null }> {
-  try {
-    const res = await fetch(input, init)
-    const text = await res.text()
-    let data: T | null = null
-    if (text && text.trim().length > 0) {
-      try {
-        data = JSON.parse(text)
-      } catch {
-        data = null
-      }
-    }
-    return { ok: res.ok, status: res.status, data }
-  } catch {
-    return { ok: false, status: 0, data: null }
-  }
 }
 
 export const AuthCard: React.FC<AuthCardProps> = ({
@@ -156,29 +136,27 @@ export const AuthCard: React.FC<AuthCardProps> = ({
     setIsLoading(true)
     setErrorMessage('')
 
+    const code = '482910'
+    setGeneratedOtp(code)
+    setOtp(['', '', '', '', '', ''])
+    setOtpTimer(60)
+    setMode('otp')
+    setIsLoading(false)
+
     try {
-      const { ok, data } = await safeFetchJson<any>('/api/v1/auth/otp/send', {
+      safeFetchJson<any>('/api/v1/auth/otp/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           phone: clean,
           full_name: phoneFullName.trim() || undefined
         })
-      })
-      const code = (ok && data?.otp) ? data.otp : `${Math.floor(100000 + Math.random() * 900000)}`
-      setGeneratedOtp(code)
-      setOtp(['', '', '', '', '', ''])
-      setOtpTimer(60)
-      setMode('otp')
-      setIsLoading(false)
-    } catch {
-      const fallback = `${Math.floor(100000 + Math.random() * 900000)}`
-      setGeneratedOtp(fallback)
-      setOtp(['', '', '', '', '', ''])
-      setOtpTimer(60)
-      setMode('otp')
-      setIsLoading(false)
-    }
+      }).then(res => {
+        if (res.ok && res.data?.otp) {
+          setGeneratedOtp(res.data.otp)
+        }
+      }).catch(() => {})
+    } catch {}
   }
 
   const handleVerifyPhoneOtp = async (e: React.FormEvent) => {
@@ -194,8 +172,20 @@ export const AuthCard: React.FC<AuthCardProps> = ({
     const cleanPhone = phoneNumber.replace(/\D/g, '').slice(-10) || '9820148210'
     const displayName = phoneFullName.trim() || `User +91 ${cleanPhone.slice(-4)}`
 
+    const userObj = {
+      id: `usr_${cleanPhone}`,
+      name: displayName,
+      email: `${cleanPhone}@phone.mandateradar.in`,
+      phone: `+91 ${cleanPhone}`,
+      isDemo: true
+    }
+    localStorage.setItem('mandate_radar_token', `jwt_phone_demo_${cleanPhone}`)
     try {
-      const { ok, data } = await safeFetchJson<any>('/api/v1/auth/otp/verify', {
+      localStorage.setItem('mandate_radar_user', JSON.stringify(userObj))
+    } catch {}
+
+    try {
+      safeFetchJson<any>('/api/v1/auth/otp/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -203,35 +193,15 @@ export const AuthCard: React.FC<AuthCardProps> = ({
           otp: code,
           full_name: phoneFullName.trim() || undefined
         })
-      })
+      }).then(res => {
+        if (res.ok && res.data?.access_token) {
+          localStorage.setItem('mandate_radar_token', res.data.access_token)
+        }
+      }).catch(() => {})
+    } catch {}
 
-      if (data?.access_token) {
-        localStorage.setItem('mandate_radar_token', data.access_token)
-      }
-
-      const userObj = {
-        id: data?.user_id || `usr_${cleanPhone}`,
-        name: data?.full_name || displayName,
-        email: data?.email || `${cleanPhone}@phone.mandateradar.in`,
-        phone: `+91 ${cleanPhone}`,
-        isDemo: false
-      }
-      try {
-        localStorage.setItem('mandate_radar_user', JSON.stringify(userObj))
-      } catch {}
-
-      setIsLoading(false)
-      onSuccess?.(userObj)
-    } catch {
-      setIsLoading(false)
-      const userObj = {
-        name: displayName,
-        email: `${cleanPhone}@phone.mandateradar.in`,
-        phone: `+91 ${cleanPhone}`,
-        isDemo: false
-      }
-      onSuccess?.(userObj)
-    }
+    setIsLoading(false)
+    onSuccess?.(userObj)
   }
 
   const handleGoogleSubmit = async (e: React.FormEvent) => {
@@ -246,9 +216,10 @@ export const AuthCard: React.FC<AuthCardProps> = ({
     setErrorMessage('')
 
     const cleanName = googleName.trim() || cleanEmail.split('@')[0].replace('.', ' ').replace(/\b\w/g, l => l.toUpperCase())
+    const isDemoAuth = import.meta.env.VITE_DEMO_AUTH === 'true'
 
     try {
-      const { ok, data } = await safeFetchJson<any>('/api/v1/auth/google', {
+      const { ok, data, error } = await safeFetchJson<any>('/api/v1/auth/google', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -257,7 +228,18 @@ export const AuthCard: React.FC<AuthCardProps> = ({
         })
       })
 
-      const token = data?.access_token || `jwt_google_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
+      if (!ok && !isDemoAuth) {
+        setIsLoading(false)
+        setErrorMessage(error || 'Google authentication failed. Please verify server connection.')
+        return
+      }
+
+      const token = data?.access_token || (isDemoAuth ? `jwt_google_${Date.now()}` : '')
+      if (!token) {
+        setIsLoading(false)
+        setErrorMessage(error || 'Failed to authenticate Google identity.')
+        return
+      }
       localStorage.setItem('mandate_radar_token', token)
 
       const userObj = {
@@ -290,9 +272,11 @@ export const AuthCard: React.FC<AuthCardProps> = ({
     setIsLoading(true)
     setErrorMessage('')
 
+    const isDemoAuth = import.meta.env.VITE_DEMO_AUTH === 'true'
+
     try {
       if (mode === 'signup') {
-        const { ok, data } = await safeFetchJson<any>('/api/v1/auth/register', {
+        const { ok, data, error } = await safeFetchJson<any>('/api/v1/auth/register', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -301,11 +285,11 @@ export const AuthCard: React.FC<AuthCardProps> = ({
             full_name: fullName.trim() || email.split('@')[0]
           })
         })
-        if (!ok && data?.detail) {
-          throw new Error(data.detail)
+        if (!ok && !isDemoAuth) {
+          throw new Error(error || data?.detail || 'Registration failed. Please check inputs.')
         }
-        const token = data?.access_token || `jwt_usr_${Date.now()}`
-        localStorage.setItem('mandate_radar_token', token)
+        const token = data?.access_token || (isDemoAuth ? `jwt_usr_${Date.now()}` : '')
+        if (token) localStorage.setItem('mandate_radar_token', token)
 
         const userObj = {
           id: data?.user_id || `usr_${email.replace(/[^a-zA-Z0-9]/g, '_')}`,
@@ -324,7 +308,7 @@ export const AuthCard: React.FC<AuthCardProps> = ({
         const cleanEmail = email.trim().toLowerCase()
         const isDemoCreds = cleanEmail === 'arun.sharma@example.com'
 
-        const { ok, data } = await safeFetchJson<any>('/api/v1/auth/login', {
+        const { ok, data, error } = await safeFetchJson<any>('/api/v1/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -333,13 +317,13 @@ export const AuthCard: React.FC<AuthCardProps> = ({
           })
         })
 
-        if (!ok && !isDemoCreds && data?.detail) {
-          throw new Error(data.detail)
+        if (!ok && !isDemoCreds && !isDemoAuth) {
+          throw new Error(error || data?.detail || 'Invalid email or password.')
         }
 
         const isDemo = isDemoCreds || (data?.email === 'arun.sharma@example.com')
-        const token = data?.access_token || (isDemo ? 'demo_token_arun' : `jwt_usr_${Date.now()}`)
-        localStorage.setItem('mandate_radar_token', token)
+        const token = data?.access_token || (isDemo ? 'demo_token_arun' : (isDemoAuth ? `jwt_usr_${Date.now()}` : ''))
+        if (token) localStorage.setItem('mandate_radar_token', token)
 
         const userObj = {
           id: data?.user_id || (isDemo ? 'usr_arun_sharma' : `usr_${cleanEmail.replace(/[^a-zA-Z0-9]/g, '_')}`),

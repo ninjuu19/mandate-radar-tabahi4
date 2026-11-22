@@ -31,17 +31,22 @@ import {
   Check,
   Shield,
   RefreshCw,
-  Plus
+  Plus,
+  Calendar as CalendarIcon
 } from 'lucide-react'
 import type { Mandate, Finding, ReconciliationResult } from '../types'
 import { inr } from '../lib/format'
+import { apiFetch, authFetchJson } from '../lib/api'
 import { RadarView } from './RadarView'
 import { MandateDrawer } from './MandateDrawer'
 import { GraphCanvas, type GraphNode, type GraphEdge } from './GraphCanvas'
+import { GraphGuide } from './GraphGuide'
+import { MandateCalendar } from './MandateCalendar'
 import { FindingsConfirmationModal } from './FindingsConfirmationModal'
 
 export type DashboardTab =
   | 'portfolio'
+  | 'calendar'
   | 'graph'
   | 'upload'
   | 'banks'
@@ -49,6 +54,28 @@ export type DashboardTab =
   | 'benchmark'
   | 'neo4j'
   | 'profile'
+
+async function readApiResponse<T>(response: Response): Promise<T> {
+  let data: any
+  try {
+    data = await response.json()
+  } catch {
+    throw new Error('The server returned an invalid response.')
+  }
+
+  if (!response.ok) {
+    const detail = data?.detail
+    throw new Error(
+      typeof detail === 'string'
+        ? detail
+        : detail
+          ? JSON.stringify(detail)
+          : `Request failed with status ${response.status}.`
+    )
+  }
+
+  return data as T
+}
 
 interface DashboardLayoutProps {
   user?: {
@@ -99,15 +126,11 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
   const [selectedMandate, setSelectedMandate] = useState<Mandate | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [cypherResult, setCypherResult] = useState<any>(null)
-
-  // Local active mandates state so updates reflect immediately
-  const [localMandates, setLocalMandates] = useState<Mandate[]>(mandates)
-  React.useEffect(() => {
-    setLocalMandates(mandates)
-  }, [mandates])
-
-  // Active User Context
-  const userId = user?.id || 'usr_primary'
+  const [neo4jGraphData, setNeo4jGraphData] = useState<{ nodes: GraphNode[]; edges: GraphEdge[]; stats: any } | null>(null)
+  const [isLoadingGraph, setIsLoadingGraph] = useState(false)
+  const [graphError, setGraphError] = useState<string | null>(null)
+  const [graphMode, setGraphMode] = useState<string>('portfolio')
+  const [statementTxnCount, setStatementTxnCount] = useState<number>(0)
   const [userName, setUserName] = useState(user?.name || 'Rahul Sharma')
   const [userEmail, setUserEmail] = useState(user?.email || 'rahul.sharma@example.com')
   const [userPhone, setUserPhone] = useState(user?.phone || '+91 98201 48210')
@@ -118,6 +141,235 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
   const [trialWarningAlert, setTrialWarningAlert] = useState(true)
   const [whatsappAlerts, setWhatsappAlerts] = useState(true)
   const [profileSavedToast, setProfileSavedToast] = useState(false)
+
+  const loadNeo4jGraph = React.useCallback(async () => {
+    setIsLoadingGraph(true)
+    setGraphError(null)
+    try {
+      const response = await apiFetch('/api/graph?mode=portfolio')
+      const data = await readApiResponse<{ nodes: GraphNode[]; edges: GraphEdge[]; stats: any }>(response)
+      if (!Array.isArray(data.nodes) || !Array.isArray(data.edges)) {
+        throw new Error('The graph response is missing nodes or relationships.')
+      }
+      setNeo4jGraphData(data)
+    } catch (err) {
+      setGraphError(err instanceof Error ? err.message : 'Unable to load the Neo4j graph.')
+    } finally {
+      setIsLoadingGraph(false)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    if (activeTab === 'graph') {
+      void loadNeo4jGraph()
+    }
+  }, [activeTab, loadNeo4jGraph])
+
+  // Local active mandates state so updates reflect immediately
+  const [localMandates, setLocalMandates] = useState<Mandate[]>(mandates)
+  React.useEffect(() => {
+    setLocalMandates(mandates)
+  }, [mandates])
+
+  // Build dynamic Neo4j graph reflecting active user mandates
+  const dynamicGraph = React.useMemo(() => {
+    const activeUserName = user?.name || userName || 'My Portfolio'
+    const centerUserId = 'usr_active_center'
+
+    if (!localMandates || localMandates.length === 0) {
+      const updatedNodes = (graphData.nodes || []).map(n =>
+        (n.type === 'user' || n.type === 'person' || n.group === 'user' || n.group === 'person')
+          ? { ...n, label: 'Account Holder', name: activeUserName, properties: { ...n.properties, name: activeUserName } }
+          : n
+      )
+      return { ...graphData, nodes: updatedNodes }
+    }
+
+    const nodes: GraphNode[] = []
+    const edges: GraphEdge[] = []
+    const parentMap = new Map<string, { name: string; cost: number; count: number }>()
+    const railMap = new Map<string, string>()
+
+    // Calculate total annual exposure across all active user mandates
+    const totalCommitted = localMandates.reduce((acc, m) => acc + (m.annual_committed_cost || 0), 0)
+
+    // 1. Center User Node
+    nodes.push({
+      id: centerUserId,
+      label: 'Account Holder',
+      name: activeUserName,
+      type: 'person',
+      group: 'person',
+      properties: { name: activeUserName, role: 'Account Holder', cost: totalCommitted, count: localMandates.length }
+    })
+
+    // Track which mandates overlap
+    const overlapPairs: { i: number; j: number; savings: number; reason: string }[] = []
+    for (let i = 0; i < localMandates.length; i++) {
+      for (let j = i + 1; j < localMandates.length; j++) {
+        const m1 = localMandates[i]
+        const m2 = localMandates[j]
+        const n1 = (m1.merchant_name || m1.descriptor || '').toLowerCase()
+        const n2 = (m2.merchant_name || m2.descriptor || '').toLowerCase()
+        const c1 = (m1.category || '').toLowerCase()
+        const c2 = (m2.category || '').toLowerCase()
+
+        let isOverlap = false
+        let reason = ''
+        const savings = Math.min(m1.annual_committed_cost || 0, m2.annual_committed_cost || 0)
+
+        // Duplicate merchant across channels or descriptors (e.g. CloudStore, InsureCo)
+        if (n1 && n2 && (n1.includes(n2) || n2.includes(n1) || (n1.includes('cloud') && n2.includes('cloud')))) {
+          isOverlap = true
+          reason = 'Duplicate Subscription Mandates'
+        }
+        // Streaming video overlap (Netflix, Amazon Prime, Hotstar, Disney, StreamPlus)
+        else if ((n1.includes('netflix') || n1.includes('prime') || n1.includes('hotstar') || n1.includes('disney') || n1.includes('stream')) &&
+                 (n2.includes('netflix') || n2.includes('prime') || n2.includes('hotstar') || n2.includes('disney') || n2.includes('stream'))) {
+          isOverlap = true
+          reason = 'Redundant OTT Video Subscriptions'
+        }
+        // Audio / Music streaming overlap (Spotify, YouTube Music)
+        else if ((n1.includes('spotify') || n1.includes('youtube') || n1.includes('music')) &&
+                 (n2.includes('spotify') || n2.includes('youtube') || n2.includes('music'))) {
+          isOverlap = true
+          reason = 'Duplicate Music Streaming Catalog'
+        }
+        // Same category overlap
+        else if (c1 && c2 && c1 === c2 && (c1.includes('stream') || c1.includes('entertainment') || c1.includes('audio'))) {
+          isOverlap = true
+          reason = `Redundant ${m1.category} Overlap`
+        }
+
+        if (isOverlap) {
+          overlapPairs.push({ i, j, savings, reason })
+        }
+      }
+    }
+
+    const overlapNodeIndices = new Set<number>()
+    overlapPairs.forEach(p => {
+      overlapNodeIndices.add(p.i)
+      overlapNodeIndices.add(p.j)
+    })
+
+    localMandates.forEach((m, idx) => {
+      // 2. Merchant / Mandate Node
+      const merchantNodeId = `node_${m.id || idx}`
+      const mName = m.merchant_name || m.descriptor
+      const hasOverlap = overlapNodeIndices.has(idx)
+      const matchingPair = overlapPairs.find(p => p.i === idx || p.j === idx)
+
+      nodes.push({
+        id: merchantNodeId,
+        label: mName,
+        name: mName,
+        type: 'merchant',
+        group: 'merchant',
+        properties: {
+          name: mName,
+          cost: m.annual_committed_cost,
+          cadence: m.cadence,
+          amount: m.latest_amount,
+          rail: m.mechanism,
+          flag: m.flag,
+          category: m.category,
+          hasOverlap,
+          overlapSavings: matchingPair?.savings || 0,
+          overlapReason: matchingPair?.reason || ''
+        }
+      })
+
+      // Edge from User to Merchant
+      const cadenceText = m.cadence === 'MONTHLY' ? '/mo' : m.cadence === 'QUARTERLY' ? '/qtr' : m.cadence === 'WEEKLY' ? '/wk' : '/yr'
+      edges.push({
+        id: `edge_comm_${idx}`,
+        source: centerUserId,
+        target: merchantNodeId,
+        type: 'COMMITTED_TO',
+        label: `₹${m.latest_amount?.toLocaleString('en-IN')}${cadenceText}`,
+        properties: { amount: m.latest_amount, cadence: m.cadence }
+      })
+
+      // 3. Parent Conglomerate Node
+      const parentName = m.parent_name || (mName.toLowerCase().includes('google') ? 'Alphabet Inc' : mName.toLowerCase().includes('amazon') ? 'Amazon.com Inc' : mName.toLowerCase().includes('netflix') ? 'Netflix Inc' : mName.toLowerCase().includes('spotify') ? 'Spotify AB' : mName.toLowerCase().includes('disney') ? 'The Walt Disney Company' : mName.toLowerCase().includes('lic') ? 'Life Insurance Corp' : 'Independent Entity')
+      const parentId = `parent_${parentName.toLowerCase().replace(/[^a-z0-9]/g, '_')}`
+      if (!parentMap.has(parentId)) {
+        parentMap.set(parentId, { name: parentName, cost: m.annual_committed_cost || 0, count: 1 })
+      } else {
+        const existing = parentMap.get(parentId)!
+        existing.cost += (m.annual_committed_cost || 0)
+        existing.count += 1
+      }
+
+      edges.push({
+        id: `edge_parent_${idx}`,
+        source: merchantNodeId,
+        target: parentId,
+        type: 'OWNED_BY',
+        label: 'OWNED_BY',
+        properties: {}
+      })
+
+      // 4. Payment Rail Node
+      const railCode = m.mechanism || 'UPI_AUTOPAY'
+      const railLabel = m.mechanism_name || (railCode === 'BANK_NACH' ? 'e-NACH Mandate' : railCode === 'UPI_AUTOPAY' ? 'UPI AutoPay' : railCode === 'CARD_SI' ? 'Card Standing Instruction' : 'Direct Merchant')
+      const railId = `rail_${railCode.toLowerCase()}`
+      if (!railMap.has(railId)) {
+        railMap.set(railId, railLabel)
+        nodes.push({
+          id: railId,
+          label: railLabel,
+          name: railLabel,
+          type: 'rail',
+          group: 'rail',
+          properties: { name: railLabel }
+        })
+      }
+
+      edges.push({
+        id: `edge_rail_${idx}`,
+        source: merchantNodeId,
+        target: railId,
+        type: 'ROUTED_VIA',
+        label: 'ROUTED_VIA',
+        properties: {}
+      })
+    })
+
+    // Add aggregate Parent Nodes with combined fintech exposure
+    parentMap.forEach((val, pId) => {
+      nodes.push({
+        id: pId,
+        label: val.name,
+        name: val.name,
+        type: 'parent',
+        group: 'parent',
+        properties: { name: val.name, cost: val.cost, merchantCount: val.count }
+      })
+    })
+
+    // Add Overlap Edges
+    overlapPairs.forEach((p, idx) => {
+      edges.push({
+        id: `edge_overlap_${idx}`,
+        source: `node_${localMandates[p.i].id || p.i}`,
+        target: `node_${localMandates[p.j].id || p.j}`,
+        type: 'OVERLAPS_WITH',
+        label: `OVERLAP: Save ₹${p.savings.toLocaleString('en-IN')}`,
+        properties: {
+          category: localMandates[p.i].category,
+          savings: p.savings,
+          reason: p.reason
+        }
+      })
+    })
+
+    return { nodes, edges, stats: { merchant_count: localMandates.length, parent_count: parentMap.size, overlap_count: overlapPairs.length } }
+  }, [localMandates, user?.name, userName, graphData])
+
+  // Active User Context
+  const userId = user?.id || 'usr_primary'
 
   React.useEffect(() => {
     if (user?.name) setUserName(user.name)
@@ -154,7 +406,7 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
   // Handle mandate cancellation confirmation
   const handleConfirmCancelMandate = async (mandateId: string) => {
     try {
-      await fetch(`/api/mandates/${mandateId}/cancel-confirm?user_id=${userId}`, {
+      await apiFetch(`/api/mandates/${mandateId}/cancel-confirm`, {
         method: 'POST'
       })
     } catch {}
@@ -186,10 +438,10 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
   // Handle user scoped tag addition
   const handleAddMandateTag = async (mandateId: string, tag: string) => {
     try {
-      await fetch(`/api/mandates/${mandateId}/tags?user_id=${userId}`, {
+      await apiFetch(`/api/mandates/${mandateId}/tags`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tag, user_id: userId })
+        body: JSON.stringify({ tag, tags: [tag] })
       })
     } catch {}
 
@@ -213,15 +465,17 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
   // Handle graph finding decision confirmation
   const handleConfirmFindingDecision = async (findingId: string, keepMandateIds: string[]) => {
     try {
-      await fetch(`/api/findings/${findingId}/decision`, {
+      await apiFetch(`/api/findings/${findingId}/decision`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           finding_id: findingId,
+          finding_key: findingId,
           finding_type: 'overlap',
+          choice: 'CONFIRMED',
           chosen_action: 'keep_selected',
-          confirmed_mandate_ids: keepMandateIds,
-          user_id: userId
+          kept_mandate_ids: keepMandateIds,
+          confirmed_mandate_ids: keepMandateIds
         })
       })
     } catch {}
@@ -252,25 +506,37 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
     const formData = new FormData()
     formData.append('file', file)
     formData.append('account_label', uploadAccountLabel || 'Primary Account')
-    formData.append('user_id', userId)
 
     try {
-      const res = await fetch('/api/statement/upload', {
+      const res = await apiFetch('/api/statement/upload', {
         method: 'POST',
         body: formData
       })
+      const data = await readApiResponse<any>(res)
 
-      if (!res.ok) throw new Error('Failed to analyze statement.')
-      const data = await res.json()
+      const uploadedMandates: Mandate[] = Array.isArray(data.mandates) ? data.mandates : []
+      setLocalMandates(uploadedMandates)
+      onUpdateMandates?.(uploadedMandates)
+      setStatementTxnCount(data.rows_parsed || uploadedMandates.reduce((acc, m) => acc + (m.charge_count || 1), 0))
 
-      if (data.mandates && data.mandates.length > 0) {
-        setLocalMandates(data.mandates)
-        onUpdateMandates?.(data.mandates)
+      if (data.hero_metrics) {
+        onUpdateHeroMetrics?.(data.hero_metrics)
+      } else {
+        const totalAnnual = uploadedMandates.reduce((acc, m) => acc + (m.annual_committed_cost || 0), 0)
+        onUpdateHeroMetrics?.({
+          annual_committed_total: totalAnnual,
+          monthly_equivalent: Math.round(totalAnnual / 12),
+          potential_savings: data.annual_potential_savings || 0,
+          total_mandates_found: uploadedMandates.length,
+          flagged_issues_count: uploadedMandates.filter(m => m.flag && m.flag !== 'HEALTHY').length
+        })
       }
 
       if (data.findings && data.findings.length > 0) {
         setFindings(data.findings)
         setIsFindingsModalOpen(true)
+      } else {
+        setFindings([])
       }
 
       if (data.reconciliation) {
@@ -286,6 +552,7 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
       setUploadMessage(
         `Successfully analyzed statement: ${data.mandates_found || data.mandates?.length || 0} recurring charges mapped from "${uploadAccountLabel}".`
       )
+      await loadNeo4jGraph()
     } catch (err: any) {
       console.warn('Backend upload notice:', err)
       const text = await file.text()
@@ -476,7 +743,7 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
         setIsFindingsModalOpen(true)
         setUploadMessage(`Following statement analyzed: SUCCESS! Zero charges detected for YouTube Music. Cancellation verified.`)
       } else {
-        setUploadMessage(`Processed statement for "${uploadAccountLabel}". Synced with Neo4j graph engine.`)
+        setUploadError(err instanceof Error ? err.message : 'Unable to read this CSV file.')
       }
     } finally {
       setIsUploading(false)
@@ -508,22 +775,25 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
 
   const runCypher = async () => {
     try {
-      const res = await fetch('/api/graph/cypher', {
+      const res = await apiFetch('/api/graph/cypher', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           query: 'MATCH (u:Person)-[r:HAS_MANDATE]->(m:Mandate)-[:FOR_VENDOR]->(v:Vendor) RETURN v.name AS Parent, collect(m.merchant_name) AS ActiveMerchants, sum(m.annual_committed_cost) AS AnnualCommittedSpend'
         })
       })
-      if (res.ok) {
-        const data = await res.json()
-        if (data.records && data.records.length > 0) {
-          setCypherResult({
-            summary: `Matched ${localMandates.length} recurring mandates against ${data.records.length} parent corporate entities in Neo4j.`,
-            results: data.records
-          })
-          return
-        }
+      const data = await readApiResponse<any>(res)
+      const records = Array.isArray(data.data) ? data.data : []
+      if (data.status === 'SUCCESS' && records.length > 0) {
+        setCypherResult({
+          summary: `Neo4j returned ${records.length} graph records (${data.mode || 'graph engine'}).`,
+          results: records.map((record: any) => ({
+            Parent: record.Parent || record.parent || record.parent_name || 'Merchant group',
+            ActiveMerchants: record.ActiveMerchants || record.merchants || [],
+            AnnualCommittedSpend: record.AnnualCommittedSpend || record.annual_committed_spend || 0
+          }))
+        })
+        return
       }
     } catch {}
 
@@ -602,7 +872,7 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
                   {user?.accountLabel || uploadAccountLabel || 'Primary Statement'}
                 </div>
                 <div className="text-[10px] font-mono text-[#BAC8BF]">
-                  {localMandates.length * 14} Txns · {localMandates.length} Active Mandates
+                  {statementTxnCount > 0 ? statementTxnCount : (localMandates.length > 0 ? localMandates.reduce((acc, m) => acc + (m.charge_count || 1), 0) : 0)} Txns · {localMandates.length} Active Mandates
                 </div>
               </div>
             </div>
@@ -626,6 +896,24 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
               </div>
               <span className={`font-mono text-[10px] px-1.5 py-0.5 rounded-md ${activeTab === 'portfolio' ? 'bg-[#0E2419]/20 text-[#0E2419] font-bold' : 'bg-white/10 text-white'}`}>
                 {localMandates.length}
+              </span>
+            </button>
+
+            {/* 1.5. Auto-Debit Calendar */}
+            <button
+              onClick={() => setActiveTab('calendar')}
+              className={`w-full px-3.5 py-2.5 rounded-xl text-xs font-medium flex items-center justify-between transition-all cursor-pointer ${
+                activeTab === 'calendar'
+                  ? 'bg-[#EEDBCA] text-[#0E2419] font-bold shadow-md'
+                  : 'text-[#EEDBCA]/85 hover:bg-[#163525] hover:text-white'
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <CalendarIcon className="w-4 h-4 text-[#2DE2B5]" />
+                <span>Auto-Debit Calendar</span>
+              </div>
+              <span className={`font-mono text-[10px] px-1.5 py-0.5 rounded-md ${activeTab === 'calendar' ? 'bg-[#0E2419]/20 text-[#0E2419] font-bold' : 'bg-[#2DE2B5]/15 text-[#2DE2B5]'}`}>
+                Schedule
               </span>
             </button>
 
@@ -807,6 +1095,7 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
           <div>
             <h1 className="text-xl sm:text-2xl font-extrabold text-[#0F1713] tracking-tight flex items-center gap-2">
               {activeTab === 'portfolio' && 'Mandate Portfolio Radar'}
+              {activeTab === 'calendar' && 'Auto-Debit Calendar'}
               {activeTab === 'graph' && 'Neo4j Knowledge Graph'}
               {activeTab === 'upload' && 'Upload Bank Statement'}
               {activeTab === 'banks' && 'Bank Mandate Integrations'}
@@ -891,15 +1180,31 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
             />
           )}
 
+          {/* TAB 1.5: AUTO-DEBIT CALENDAR */}
+          {activeTab === 'calendar' && (
+            <MandateCalendar
+              mandates={visibleMandates}
+              onSelectMandate={m => setSelectedMandate(m)}
+              onUploadStatement={() => setActiveTab('upload')}
+            />
+          )}
+
           {/* TAB 2: GRAPH EXPLORER */}
           {activeTab === 'graph' && (
             <div className="space-y-6">
+              {/* Visual Interactive Guide */}
+              <GraphGuide
+                currentMode={graphMode}
+                onModeChange={setGraphMode}
+                onRunCypher={runCypher}
+              />
+
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-[#E8E1D2]">
                 <div>
                   <h2 className="text-lg font-bold text-[#0F1713] flex items-center gap-2">
                     <span>Interactive Neo4j Graph Engine</span>
                     <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-[#C6F6D5] text-[#0B2417] font-semibold">
-                      Live Topology
+                      Graph Snapshot
                     </span>
                   </h2>
                   <p className="text-xs text-[#64756B] mt-0.5">
@@ -907,22 +1212,58 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
                   </p>
                 </div>
 
-                <button
-                  onClick={runCypher}
-                  className="pill-fernwood-sand text-xs flex items-center gap-1.5 cursor-pointer self-start sm:self-auto border border-[#E8E1D2]"
-                >
-                  <Sparkles className="w-3.5 h-3.5 text-[#0E2419]" />
-                  <span>Execute Cypher Query</span>
-                </button>
+                <div className="flex items-center gap-2 self-start sm:self-auto">
+                  <button
+                    onClick={() => void loadNeo4jGraph()}
+                    disabled={isLoadingGraph}
+                    className="px-3.5 py-1.5 rounded-xl bg-white text-[#0E2419] font-mono text-xs font-semibold flex items-center gap-1.5 hover:bg-[#F2EDE2] transition-colors cursor-pointer shadow-sm border border-[#E8E1D2] disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isLoadingGraph ? 'animate-spin' : ''}`} />
+                    <span>Refresh Graph</span>
+                  </button>
+                  <button
+                    onClick={runCypher}
+                    className="px-3.5 py-1.5 rounded-xl bg-[#0E2419] text-[#2DE2B5] font-mono text-xs font-semibold flex items-center gap-1.5 hover:bg-[#163826] transition-colors cursor-pointer shadow-sm border border-[#2DE2B5]/30"
+                    title="Run a read-only graph rollup"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-[#2DE2B5]" />
+                    <span>Run Neo4j Cypher Rollup</span>
+                  </button>
+                </div>
               </div>
 
-              <div className="h-[520px] bg-[#0A100D] border border-[#E8E1D2] rounded-3xl overflow-hidden relative shadow-xl">
-                <GraphCanvas
-                  nodes={graphData.nodes}
-                  edges={graphData.edges}
-                  selectedNodeId={null}
-                  onSelectNode={() => {}}
-                />
+              <div className="h-[580px] bg-[#0A100D] border border-[#E8E1D2] rounded-3xl overflow-hidden relative shadow-xl">
+                {graphError && (
+                  <div className="absolute inset-x-4 top-4 z-10 rounded-xl border border-red-400/40 bg-red-950/90 px-4 py-3 text-xs text-red-100">
+                    Could not load the Neo4j graph: {graphError}
+                  </div>
+                )}
+                {isLoadingGraph && !neo4jGraphData && (
+                  <div className="absolute inset-0 flex items-center justify-center text-sm text-[#BAC8BF]">
+                    Loading your Neo4j graph…
+                  </div>
+                )}
+                {neo4jGraphData && neo4jGraphData.nodes.length === 0 && !isLoadingGraph && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-center text-[#BAC8BF]">
+                    <Network className="h-8 w-8 text-[#2DE2B5]" />
+                    <p className="text-sm">No statement data is in this graph yet.</p>
+                    <button
+                      onClick={() => setActiveTab('upload')}
+                      className="rounded-xl border border-[#2DE2B5]/40 px-3 py-2 text-xs font-semibold text-[#2DE2B5] hover:bg-[#163826]"
+                    >
+                      Upload a CSV statement
+                    </button>
+                  </div>
+                )}
+                {neo4jGraphData?.nodes.length || (!neo4jGraphData && !isLoadingGraph && !graphError) ? (
+                  <GraphCanvas
+                    nodes={neo4jGraphData?.nodes || dynamicGraph.nodes}
+                    edges={neo4jGraphData?.edges || dynamicGraph.edges}
+                    currentMode={graphMode}
+                    onModeChange={setGraphMode}
+                    onNodeClick={() => {}}
+                  />
+                ) : null}
               </div>
 
               {cypherResult && (
@@ -992,13 +1333,19 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".csv"
+                accept=".csv,.txt,.tsv,text/csv,text/tab-separated-values"
                 onChange={handleFileUpload}
                 className="hidden"
               />
 
               {/* Drag & Drop Upload Target */}
               <div
+                onDragOver={e => e.preventDefault()}
+                onDrop={e => {
+                  e.preventDefault()
+                  const file = e.dataTransfer.files[0]
+                  if (file) void processStatementFile(file)
+                }}
                 onClick={() => fileInputRef.current?.click()}
                 className="p-10 rounded-3xl border-2 border-dashed border-[#D8CEBC] hover:border-[#0E2419] bg-white text-center space-y-4 transition-colors cursor-pointer group shadow-sm"
               >

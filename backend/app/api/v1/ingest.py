@@ -131,10 +131,8 @@ async def ingest_bank_statement_pdf(
 
     # 6. Upsert Detected Mandates in Database
     for m in analysis.get("mandates", []):
-        existing_mand = db.query(Mandate).filter(
-            Mandate.user_id == user.id,
-            Mandate.descriptor == m["descriptor"]
-        ).first()
+        mand_pk = f"{user.id}_{m['id']}" if not m['id'].startswith(f"{user.id}_") else m['id']
+        existing_mand = db.query(Mandate).filter(Mandate.id == mand_pk).first()
 
         if existing_mand:
             existing_mand.latest_amount = float(m["latest_amount"])
@@ -144,7 +142,7 @@ async def ingest_bank_statement_pdf(
             existing_mand.last_charged = datetime.strptime(m["last_charged"][:10], "%Y-%m-%d").date()
         else:
             new_mand = Mandate(
-                id=m["id"],
+                id=mand_pk,
                 user_id=user.id,
                 account_id=account.id,
                 merchant_id=m.get("merchant_id"),

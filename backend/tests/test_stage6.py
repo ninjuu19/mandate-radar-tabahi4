@@ -88,34 +88,56 @@ def test_pre_debit_matching():
     assert any(a["type"] == "DORMANT_SUBSCRIPTION_DEBIT" for a in match_res["risk_alerts"])
 
 def test_mandate_api_lifecycle():
+    from app.core.db import SessionLocal
+    from app.models.user import User
+    from app.services.auth_service import create_access_token
+
     client = TestClient(app)
     
+    # 0. Unauthenticated access returns 401
+    unauth_res = client.get("/api/v1/mandates")
+    assert unauth_res.status_code == 401
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).first()
+        if not user:
+            user = User(id="stage6_user", email="stage6@example.com", password_hash="test", full_name="Stage 6 User")
+            db.add(user)
+            db.commit()
+        user_id = user.id
+    finally:
+        db.close()
+
+    token = create_access_token({"sub": user_id})
+    headers = {"Authorization": f"Bearer {token}"}
+
     # Fetch mandates
-    res = client.get("/api/v1/mandates")
+    res = client.get("/api/v1/mandates", headers=headers)
     assert res.status_code == 200
     mandates = res.json()
     assert len(mandates) > 0
     target_id = mandates[0]["id"]
     
     # 1. Pause mandate
-    pause_res = client.post(f"/api/v1/mandates/{target_id}/pause")
+    pause_res = client.post(f"/api/v1/mandates/{target_id}/pause", headers=headers)
     assert pause_res.status_code == 200
     assert pause_res.json()["status"] == "PAUSED"
     
     # 2. Resume mandate
-    resume_res = client.post(f"/api/v1/mandates/{target_id}/resume")
+    resume_res = client.post(f"/api/v1/mandates/{target_id}/resume", headers=headers)
     assert resume_res.status_code == 200
     assert resume_res.json()["status"] == "ACTIVE"
     
     # 3. Attach token & verify
-    verify_res = client.post(f"/api/v1/mandates/{target_id}/verify?token=4A8F9C2D1E0B3A4F8C9D2E1B0A3F4C8D")
+    verify_res = client.post(f"/api/v1/mandates/{target_id}/verify?token=4A8F9C2D1E0B3A4F8C9D2E1B0A3F4C8D", headers=headers)
     assert verify_res.status_code == 200
     assert verify_res.json()["mandate_type"] == "VERIFIED_UPI_AUTOPAY"
     
     # 4. Pre-debit alert endpoint
     alert_res = client.post("/api/v1/mandates/pre-debit-alert", json={
         "alert_text": "Alert: Rs 149.00 scheduled on 2026-11-25 for YouTube Premium auto-debit."
-    })
+    }, headers=headers)
     assert alert_res.status_code == 200
     assert alert_res.json()["matched"] is True
 

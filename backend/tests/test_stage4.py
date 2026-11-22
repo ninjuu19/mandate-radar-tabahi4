@@ -4,6 +4,9 @@ Validates Statistical Cadence Detection, Missed Cycle Recovery,
 Variable Metered Bill Rejection, Anomaly Detection, and Analytics APIs.
 """
 from datetime import date, timedelta
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from fastapi.testclient import TestClient
 
 from app.services.cadence_detector import CadenceDetector
@@ -87,10 +90,32 @@ def test_price_hike_and_trial_detection():
     assert "Trial conversion trap" in mandate["flag_reason"]
 
 def test_analytics_api():
+    from app.core.db import SessionLocal
+    from app.models.user import User
+    from app.services.auth_service import create_access_token
+
     client = TestClient(app)
     
+    # 0. Unauthenticated access returns 401
+    unauth_res = client.get("/api/v1/analytics/recurring")
+    assert unauth_res.status_code == 401
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).first()
+        if not user:
+            user = User(id="stage4_user", email="stage4@example.com", password_hash="test", full_name="Stage 4 User")
+            db.add(user)
+            db.commit()
+        user_id = user.id
+    finally:
+        db.close()
+
+    token = create_access_token({"sub": user_id})
+    headers = {"Authorization": f"Bearer {token}"}
+
     # Test recurring analytics endpoint
-    res = client.get("/api/v1/analytics/recurring")
+    res = client.get("/api/v1/analytics/recurring", headers=headers)
     assert res.status_code == 200
     data = res.json()
     assert "mandates" in data
@@ -100,7 +125,7 @@ def test_analytics_api():
     assert data["metrics"]["mandates_found"] > 0
     
     # Test anomalies endpoint
-    anom_res = client.get("/api/v1/analytics/anomalies")
+    anom_res = client.get("/api/v1/analytics/anomalies", headers=headers)
     assert anom_res.status_code == 200
     anom_data = anom_res.json()
     assert anom_data["count"] > 0

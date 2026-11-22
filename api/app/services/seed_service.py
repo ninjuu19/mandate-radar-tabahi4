@@ -51,6 +51,7 @@ def seed_database(db: Session) -> dict:
     user = db.query(User).filter(User.email == DEFAULT_USER_EMAIL).first()
     if not user:
         user = User(
+            id="user_primary",
             email=DEFAULT_USER_EMAIL,
             full_name=DEFAULT_USER_NAME,
             password_hash=hash_password("MandateRadar2026!"),

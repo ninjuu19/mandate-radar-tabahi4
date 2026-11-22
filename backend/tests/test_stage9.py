@@ -71,10 +71,32 @@ def test_ai_assistant_intents():
         db.close()
 
 def test_assistant_api_endpoints():
+    from app.core.db import SessionLocal
+    from app.models.user import User
+    from app.services.auth_service import create_access_token
+
     print("Testing Assistant API Endpoints...")
     
+    # 0. Unauthenticated chat returns 401
+    unauth_chat = client.post("/api/v1/assistant/chat", json={"message": "How much do I spend?"})
+    assert unauth_chat.status_code == 401
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).first()
+        if not user:
+            user = User(id="stage9_user", email="stage9@example.com", password_hash="test", full_name="Stage 9 User")
+            db.add(user)
+            db.commit()
+        user_id = user.id
+    finally:
+        db.close()
+
+    token = create_access_token({"sub": user_id})
+    headers = {"Authorization": f"Bearer {token}"}
+
     # 1. Suggested Prompts
-    r_prompts = client.get("/api/v1/assistant/suggested-prompts")
+    r_prompts = client.get("/api/v1/assistant/suggested-prompts", headers=headers)
     assert r_prompts.status_code == 200
     prompts = r_prompts.json()["prompts"]
     assert len(prompts) >= 5
@@ -82,7 +104,7 @@ def test_assistant_api_endpoints():
 
     # 2. Chat Endpoint
     chat_payload = {"message": "How much do I spend on subscriptions?"}
-    r_chat = client.post("/api/v1/assistant/chat", json=chat_payload)
+    r_chat = client.post("/api/v1/assistant/chat", json=chat_payload, headers=headers)
     assert r_chat.status_code == 200
     data = r_chat.json()
     assert data["intent"] == "SPEND_SUMMARY"

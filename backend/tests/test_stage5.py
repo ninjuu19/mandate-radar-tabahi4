@@ -4,6 +4,9 @@ Validates Subscription Intelligence, Anomaly Engine, Category Breakdown,
 Corporate Footprint Exposure, and Subscriptions API.
 """
 from datetime import date, timedelta
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from fastapi.testclient import TestClient
 
 from app.services.anomaly_engine import AnomalyEngine
@@ -51,10 +54,43 @@ def test_duplicate_subscription_detection():
     assert dupes[0]["potential_savings"] == 1196.0
 
 def test_subscriptions_api():
+    from app.core.db import SessionLocal
+    from app.models.user import User
+    from app.services.auth_service import create_access_token
+
     client = TestClient(app)
     
+    # 0. Unauthenticated access returns 401
+    unauth_res = client.get("/api/v1/subscriptions/overview")
+    assert unauth_res.status_code == 401
+
+    from app.models.mandate import Mandate
+
+    db = SessionLocal()
+    try:
+        mandate = db.query(Mandate).first()
+        if mandate:
+            user_id = mandate.user_id
+            # Ensure this mandate has a flag to test anomaly listing & dismissal
+            mandate.flag = "PRICE_HIKE"
+            mandate.flag_reason = "Test price hike anomaly"
+            mandate.status = "ACTIVE"
+            db.commit()
+        else:
+            user = db.query(User).first()
+            if not user:
+                user = User(id="stage5_user", email="stage5@example.com", password_hash="test", full_name="Stage 5 User")
+                db.add(user)
+                db.commit()
+            user_id = user.id
+    finally:
+        db.close()
+
+    token = create_access_token({"sub": user_id})
+    headers = {"Authorization": f"Bearer {token}"}
+
     # 1. Overview endpoint
-    res = client.get("/api/v1/subscriptions/overview")
+    res = client.get("/api/v1/subscriptions/overview", headers=headers)
     assert res.status_code == 200
     data = res.json()
     assert "hero_metrics" in data
@@ -68,14 +104,14 @@ def test_subscriptions_api():
     assert any("Alphabet" in p or "Amazon" in p or "Netflix" in p for p in parents)
     
     # 2. Anomalies endpoint
-    anom_res = client.get("/api/v1/subscriptions/anomalies")
+    anom_res = client.get("/api/v1/subscriptions/anomalies", headers=headers)
     assert anom_res.status_code == 200
     anom_data = anom_res.json()
     assert anom_data["count"] > 0
     
     # 3. Dismiss flag endpoint
     mandate_to_dismiss = anom_data["anomalies"][0]["mandate_id"]
-    dismiss_res = client.post(f"/api/v1/subscriptions/{mandate_to_dismiss}/dismiss-flag")
+    dismiss_res = client.post(f"/api/v1/subscriptions/{mandate_to_dismiss}/dismiss-flag", headers=headers)
     assert dismiss_res.status_code == 200
     assert dismiss_res.json()["flag"] == "HEALTHY"
 
