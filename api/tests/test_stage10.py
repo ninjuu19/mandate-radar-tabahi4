@@ -61,12 +61,20 @@ def test_cancellation_api_endpoints():
         assert mandate is not None
         mandate_id = mandate.id
 
+        # 0. Unauthenticated access returns 401
+        unauth_notice = client.post(f"/api/v1/mandates/{mandate_id}/cancellation-notice", json={"reason": "test"})
+        assert unauth_notice.status_code == 401
+
+        from app.services.auth_service import create_access_token
+        token = create_access_token({"sub": mandate.user_id})
+        headers = {"Authorization": f"Bearer {token}"}
+
         # 1. POST Cancellation Notice
         payload = {
             "reason": "Found cheaper alternative service",
             "account_mask": "**4821"
         }
-        res_notice = client.post(f"/api/v1/mandates/{mandate_id}/cancellation-notice", json=payload)
+        res_notice = client.post(f"/api/v1/mandates/{mandate_id}/cancellation-notice", json=payload, headers=headers)
         assert res_notice.status_code == 200
         data_notice = res_notice.json()
         assert data_notice["mandate_id"] == mandate_id
@@ -76,7 +84,7 @@ def test_cancellation_api_endpoints():
         print("  POST /api/v1/mandates/{id}/cancellation-notice: OK")
 
         # 2. GET Escalation Tree
-        res_tree = client.get(f"/api/v1/mandates/{mandate_id}/escalation-tree")
+        res_tree = client.get(f"/api/v1/mandates/{mandate_id}/escalation-tree", headers=headers)
         assert res_tree.status_code == 200
         data_tree = res_tree.json()
         assert len(data_tree["escalation_tree"]) == 4

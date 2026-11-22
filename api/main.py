@@ -3,7 +3,7 @@ Mandate Radar FastAPI Backend Server
 Track: Neo4j (Best Use of Neo4j) - Fintech Track Solution
 """
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -12,7 +12,14 @@ from typing import List, Dict, Any, Optional
 import io
 import os
 import csv
+import re
 import pandas as pd
+
+from app.deps.auth import get_current_user
+from app.models.user import User
+from app.models.mandate import Mandate
+from app.core.db import get_db
+from sqlalchemy.orm import Session
 
 from reference_data import REFERENCE_MERCHANTS, PARENT_COMPANIES, PAYMENT_MECHANISMS, ESCALATION_CHAIN
 from synthetic_data import (
@@ -22,14 +29,44 @@ from synthetic_data import (
     GROUND_TRUTH_MANDATES,
     GROUND_TRUTH_HARD_NEGATIVES
 )
-from detector import analyze_statement, clean_descriptor, detect_payment_mechanism
+from detector import (
+    analyze_statement,
+    clean_descriptor,
+    detect_payment_mechanism,
+    parse_date_series,
+    DateParseError
+)
 from neo4j_service import Neo4jKnowledgeGraph
+
+try:
+    from slowapi import _rate_limit_exceeded_handler
+    from slowapi.errors import RateLimitExceeded
+    has_slowapi = True
+except Exception:
+    has_slowapi = False
+
+try:
+    from app.api.v1.auth import limiter
+except Exception:
+    limiter = None
 
 app = FastAPI(
     title="Mandate Radar API",
     description="Deterministic Auto-Debit Mandate Detection & Neo4j Knowledge Graph Engine",
     version="2.0.0"
 )
+if has_slowapi and limiter and hasattr(limiter, "limit"):
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# CORS configuration with environment variable override
+cors_origins_env = os.getenv("CORS_ORIGINS", "")
+allowed_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()] if cors_origins_env else [
+    "http://localhost:5173", "http://127.0.0.1:5173",
+    "http://localhost:3000", "http://127.0.0.1:3000",
+    "http://localhost:8000", "http://127.0.0.1:8000",
+    "*"
+]
 
 # CORS configuration with environment variable override
 cors_origins_env = os.getenv("CORS_ORIGINS", "")
@@ -43,7 +80,6 @@ allowed_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()] 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
@@ -129,99 +165,6 @@ class ReconcileRequest(BaseModel):
     transactions: List[Dict[str, Any]]
     statement_end_date: Optional[str] = None
 
-class QuickAuthGoogleRequest(BaseModel):
-    email: str
-    full_name: Optional[str] = "User"
-    google_id: Optional[str] = None
-
-class QuickOtpSendRequest(BaseModel):
-    phone: str
-    full_name: Optional[str] = None
-
-class QuickOtpVerifyRequest(BaseModel):
-    phone: str
-    otp: str
-    full_name: Optional[str] = None
-
-class QuickAuthLoginRequest(BaseModel):
-    email: str
-    password: str
-
-class QuickAuthRegisterRequest(BaseModel):
-    email: str
-    password: str
-    full_name: Optional[str] = "User"
-
-@app.post("/api/v1/auth/google")
-def auth_google_endpoint(req: QuickAuthGoogleRequest):
-    clean_email = req.email.strip().lower()
-    clean_name = req.full_name.strip() if req.full_name else clean_email.split("@")[0].title()
-    clean_uid = f"usr_google_{clean_email.replace('@', '_').replace('.', '_')}"
-    return {
-        "access_token": f"jwt_google_{clean_uid}",
-        "token_type": "bearer",
-        "user_id": clean_uid,
-        "email": clean_email,
-        "full_name": clean_name,
-        "is_demo": False
-    }
-
-@app.post("/api/v1/auth/otp/send")
-def auth_otp_send_endpoint(req: QuickOtpSendRequest):
-    clean_phone = "".join(filter(str.isdigit, req.phone))[-10:] or "9820148210"
-    otp_code = str(100000 + (abs(hash(clean_phone)) % 900000))
-    return {
-        "success": True,
-        "phone": f"+91 {clean_phone}",
-        "otp": otp_code,
-        "sms_dispatched": True,
-        "message": f"Verification code sent to +91 {clean_phone}",
-        "expires_in": 300
-    }
-
-@app.post("/api/v1/auth/otp/verify")
-def auth_otp_verify_endpoint(req: QuickOtpVerifyRequest):
-    clean_phone = "".join(filter(str.isdigit, req.phone))[-10:] or "9820148210"
-    display_name = (req.full_name or "").strip() or f"User +91 {clean_phone[-4:]}"
-    clean_uid = f"usr_phone_{clean_phone}"
-    return {
-        "access_token": f"jwt_phone_{clean_uid}",
-        "token_type": "bearer",
-        "user_id": clean_uid,
-        "email": f"{clean_phone}@phone.mandateradar.in",
-        "full_name": display_name,
-        "is_demo": False
-    }
-
-@app.post("/api/v1/auth/login")
-def auth_login_endpoint(req: QuickAuthLoginRequest):
-    clean_email = req.email.strip().lower()
-    is_demo = clean_email == "arun.sharma@example.com"
-    clean_name = "Arun Sharma" if is_demo else clean_email.split("@")[0].title()
-    clean_uid = "usr_arun_sharma" if is_demo else f"usr_{clean_email.replace('@', '_').replace('.', '_')}"
-    return {
-        "access_token": f"jwt_{clean_uid}",
-        "token_type": "bearer",
-        "user_id": clean_uid,
-        "email": clean_email,
-        "full_name": clean_name,
-        "is_demo": is_demo
-    }
-
-@app.post("/api/v1/auth/register")
-def auth_register_endpoint(req: QuickAuthRegisterRequest):
-    clean_email = req.email.strip().lower()
-    clean_name = (req.full_name or "").strip() or clean_email.split("@")[0].title()
-    clean_uid = f"usr_{clean_email.replace('@', '_').replace('.', '_')}"
-    return {
-        "access_token": f"jwt_{clean_uid}",
-        "token_type": "bearer",
-        "user_id": clean_uid,
-        "email": clean_email,
-        "full_name": clean_name,
-        "is_demo": False
-    }
-
 @app.get("/api/info")
 def get_api_info():
     return {
@@ -264,20 +207,19 @@ def get_synthetic_dataset():
     }
 
 @app.post("/api/analyze")
-def run_analysis(payload: AnalyzeRequest):
+def run_analysis(payload: AnalyzeRequest, current_user: User = Depends(get_current_user)):
     """
     Main detection endpoint: Processes statement transactions with deterministic rules,
     resolves descriptors using Neo4j knowledge graph, and syncs graph nodes.
     """
     txs = payload.transactions if payload.transactions is not None else cached_statement
     usage = payload.usage_feed if payload.usage_feed is not None else cached_usage
-    user_name = payload.user_name or "Arun Sharma"
+    uid = str(current_user.id)
+    user_name = current_user.full_name or payload.user_name or "Arun Sharma"
 
     # Run deterministic detector
-    analysis_result = analyze_statement(txs, usage)
+    analysis_result = analyze_statement(txs, usage, user_id=uid)
     statement_end = max((t["date"] for t in txs), default=None)
-
-    uid = payload.user_id or (payload.user_name.lower().replace(" ", "_") if payload.user_name else "user_primary")
 
     # 1. Run post-cancellation reconciliation first for any previously cancelled mandates
     reconciliation = neo4j_graph.reconcile_cancelled_mandates(
@@ -330,13 +272,15 @@ def run_analysis(payload: AnalyzeRequest):
 async def upload_statement_csv(
     file: UploadFile = File(...),
     account_label: str = Form("Primary Account"),
-    user_id: str = Form("user_primary")
+    user_id: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_user)
 ):
     """
     Parses an uploaded bank statement CSV file with dynamic column mapping,
     validates headers, handles empty or malformed files, runs detection,
     executes Neo4j bundle overlap, capability overlap, and duplicate vendor analyses,
     and performs post-cancellation reconciliation with 3-day grace window.
+    Strictly protected with JWT Bearer authentication.
     """
     try:
         # Security Guard: Validate file extension
@@ -354,8 +298,9 @@ async def upload_statement_csv(
         if len(content) > MAX_FILE_SIZE:
             raise HTTPException(status_code=413, detail="File size exceeds the 25MB maximum limit.")
 
-        # Security Guard: Sanitize tenant identifier and account label
-        safe_uid = "".join(c for c in (user_id or "user_primary") if c.isalnum() or c in ("_", "-"))
+        # Derive sanitized tenant identifier strictly from authenticated user token
+        uid = str(current_user.id)
+        safe_uid = "".join(c for c in uid if c.isalnum() or c in ("_", "-"))
         safe_account_label = (account_label or "Primary Account").strip()[:100]
 
         # Decode content with fallback
@@ -381,12 +326,35 @@ async def upload_statement_csv(
             "descriptor", "description", "narration", "particulars", 
             "remarks", "details", "txn narration", "transaction narration"
         ] if k in cols), None)
-        amt_col  = next((cols[k] for k in [
-            "amount", "debit", "withdrawal", "txn amount", "amount (inr)", 
-            "txn_amount", "transaction amount", "dr"
+
+        # Separate Debit / Credit column detection
+        debit_col = next((cols[k] for k in [
+            "debit", "withdrawal", "debit amount", "withdrawal amount", "dr"
         ] if k in cols), None)
-        ref_col  = next((cols[k] for k in [
+        credit_col = next((cols[k] for k in [
+            "credit", "deposit", "credit amount", "deposit amount", "cr"
+        ] if k in cols), None)
+
+        amt_col = debit_col or next((cols[k] for k in [
+            "amount", "txn amount", "amount (inr)", 
+            "txn_amount", "transaction amount"
+        ] if k in cols), None)
+
+        type_col = next((cols[k] for k in [
+            "type", "dr/cr", "cr/dr", "indicator", "txn type", "transaction type"
+        ] if k in cols), None)
+
+        ref_col = next((cols[k] for k in [
             "ref", "reference", "chq/ref no.", "utr", "txn id", "id", "txnid"
+        ] if k in cols), None)
+        channel_col = next((cols[k] for k in [
+            "channel", "rail", "payment_channel", "payment_mode", "mode", "payment_mechanism"
+        ] if k in cols), None)
+        account_col = next((cols[k] for k in [
+            "account_id", "account", "acc_id", "acc", "account_number", "account_label"
+        ] if k in cols), None)
+        merchant_col = next((cols[k] for k in [
+            "merchant", "vendor", "payee", "merchant_name"
         ] if k in cols), None)
 
         if not date_col or not desc_col or not amt_col:
@@ -395,34 +363,121 @@ async def upload_statement_csv(
                 detail=f"CSV must contain Date, Description, and Debit/Amount columns. Found columns: {list(df.columns)}"
             )
 
+        # Unified Indian & ISO date parsing across the date column
+        try:
+            df["iso_date"] = parse_date_series(df[date_col])
+        except DateParseError as e:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid date format at row {e.row_idx}: '{e.raw_value}'"
+            )
+
         transactions = []
+        rows_total = len(df)
+        credits_dropped = 0
+        blank_or_zero = 0
+        invalid_amount = 0
+
+        # Check for signed amount layout (negative = debit, positive = credit)
+        has_signed_amounts = False
+        if not credit_col and not type_col:
+            sample_clean = []
+            for v in df[amt_col].dropna().head(50):
+                clean_v = str(v).replace(",", "").replace("₹", "").replace("Rs.", "").replace("Rs", "").replace("$", "").strip()
+                try:
+                    sample_clean.append(float(clean_v))
+                except ValueError:
+                    pass
+            has_signed_amounts = any(v < 0 for v in sample_clean) and any(v > 0 for v in sample_clean)
+
         for idx, row in df.iterrows():
-            amt_raw = str(row[amt_col]).replace(",", "").strip()
-            try:
-                amt_val = abs(float(amt_raw))
-            except ValueError:
+            # 1. Credit Column: If credit column has positive amount, drop credit transaction
+            if credit_col and pd.notna(row[credit_col]):
+                cr_raw = str(row[credit_col]).replace(",", "").replace("₹", "").replace("Rs.", "").replace("Rs", "").replace("$", "").strip()
+                try:
+                    cr_val = float(cr_raw)
+                    if cr_val > 0:
+                        credits_dropped += 1
+                        continue
+                except ValueError:
+                    pass
+
+            # 2. Type / Indicator Column: If contains CR / CREDIT, drop credit transaction
+            if type_col and pd.notna(row[type_col]):
+                t_str = str(row[type_col]).strip().upper()
+                if "CR" in t_str or "CREDIT" in t_str:
+                    credits_dropped += 1
+                    continue
+
+            # 3. Parse Debit / Amount Column
+            amt_cell = row[amt_col]
+            if pd.isna(amt_cell):
+                blank_or_zero += 1
                 continue
 
-            if amt_val <= 0:
+            amt_raw = str(amt_cell).replace(",", "").replace("₹", "").replace("Rs.", "").replace("Rs", "").replace("$", "").strip()
+            if not amt_raw or amt_raw.lower() in ("nan", "none", ""):
+                blank_or_zero += 1
+                continue
+
+            try:
+                amt_val = float(amt_raw)
+            except ValueError:
+                invalid_amount += 1
+                continue
+
+            if has_signed_amounts:
+                if amt_val > 0: # Positive in signed format is credit/deposit
+                    credits_dropped += 1
+                    continue
+                amt_val = abs(amt_val)
+            else:
+                if amt_val <= 0:
+                    blank_or_zero += 1
+                    continue
+
+            desc_raw = str(row[desc_col]).strip() if pd.notna(row[desc_col]) else ""
+            if not desc_raw or desc_raw.lower() in ("nan", "none", "null", "undefined", ""):
+                continue
+
+            date_val = str(row.get("iso_date", row[date_col])).strip()
+            if not date_val or date_val.lower() in ("nan", "none", "null", ""):
                 continue
 
             transactions.append({
                 "id": f"CSV_ROW_{idx+1}",
-                "date": str(row[date_col]).strip()[:10],
-                "descriptor": str(row[desc_col]).strip(),
-                "amount": amt_val,
+                "date": date_val[:10],
+                "descriptor": desc_raw,
+                "amount": round(amt_val, 2),
                 "type": "DEBIT",
-                "ref": str(row[ref_col]).strip() if ref_col and pd.notna(row[ref_col]) else ""
+                "ref": str(row[ref_col]).strip() if ref_col and pd.notna(row[ref_col]) else "",
+                "channel": str(row[channel_col]).strip() if channel_col and pd.notna(row[channel_col]) else "",
+                "account_id": str(row[account_col]).strip() if account_col and pd.notna(row[account_col]) else "",
+                "merchant": str(row[merchant_col]).strip() if merchant_col and pd.notna(row[merchant_col]) else ""
             })
 
-        if not transactions:
-            raise HTTPException(status_code=400, detail="No valid debit transactions could be parsed from the CSV.")
+        parse_report = {
+            "rows_total": rows_total,
+            "rows_used": len(transactions),
+            "rows_skipped": rows_total - len(transactions),
+            "reasons": {
+                "credits_dropped": credits_dropped,
+                "blank_or_zero": blank_or_zero,
+                "invalid_amount": invalid_amount
+            }
+        }
 
-        uid = user_id or "user_primary"
+        if not transactions:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No valid debit transactions could be parsed. Parsed 0 of {rows_total} rows ({credits_dropped} credits dropped, {blank_or_zero} zero/blank, {invalid_amount} invalid)."
+            )
+        uid = str(current_user.id)
         acc_label = account_label or "Primary Account"
 
-        # Run detection
-        analysis_result = analyze_statement(transactions, cached_usage, user_id=uid, account_label=acc_label)
+        # Run detection with real usage telemetry (None on statement upload - no synthetic zombie flags)
+        analysis_result = analyze_statement(transactions, usage_feed=None, user_id=uid, account_label=acc_label)
+        analysis_result["parse_report"] = parse_report
         statement_end = max((t["date"] for t in transactions), default=None)
 
         # 1. Post-cancellation reconciliation with 3-day grace window
@@ -433,7 +488,8 @@ async def upload_statement_csv(
         )
 
         # 2. Sync detected mandates into Neo4j with Account and billing type
-        neo4j_graph.sync_statement_mandates("Uploaded Statement User", analysis_result["mandates"], person_id=uid, account_label=acc_label)
+        user_display_name = current_user.full_name or "Uploaded Statement User"
+        neo4j_graph.sync_statement_mandates(user_display_name, analysis_result["mandates"], person_id=uid, account_label=acc_label)
 
         # 3. Graph Overlap Analyses in Neo4j
         bundle_overlaps = neo4j_graph.find_bundle_overlaps(uid=uid)
@@ -547,21 +603,27 @@ async def upload_statement_csv(
         raise HTTPException(status_code=500, detail=f"Failed to parse statement: {str(e)}")
 
 @app.get("/api/findings")
-def get_all_findings(uid: str = "user_primary"):
+def get_all_findings(
+    uid: Optional[str] = None,
+    current_user: User = Depends(get_current_user)
+):
     """
     Returns all actionable findings generated by Neo4j graph analyses:
     1. Bundle Overlaps (Multi-hop INCLUDES*1..6 variable-length paths)
     2. Capability Overlaps (PROVIDES clustering with anti-self-bundle & staleness threshold)
     3. Duplicate Vendors across Accounts
     4. Flagged Mandates (Price hikes, trial traps, zombies from detector)
+    Strictly scoped to authenticated current_user.
     """
-    bundle_overlaps = neo4j_graph.find_bundle_overlaps(uid=uid)
-    capability_overlaps = neo4j_graph.find_capability_overlaps(uid=uid)
-    duplicate_vendors = neo4j_graph.find_duplicate_vendors(uid=uid)
+    user_id = str(current_user.id)
+    bundle_overlaps = neo4j_graph.find_bundle_overlaps(uid=user_id)
+    capability_overlaps = neo4j_graph.find_capability_overlaps(uid=user_id)
+    duplicate_vendors = neo4j_graph.find_duplicate_vendors(uid=user_id)
 
+    user_mandate_nodes = neo4j_graph._get_user_mandate_nodes(user_id)
     mandates = [
-        n.get("properties", {}) for n in neo4j_graph.nodes
-        if n["group"] == "mandate" and n.get("properties", {}).get("status") in ["active", "flagged", "flagged_overlap", "keep_confirmed"]
+        n.get("properties", {}) for n in user_mandate_nodes
+        if n.get("properties", {}).get("status") in ["active", "flagged", "flagged_overlap", "keep_confirmed"]
     ]
     flagged_issues = [
         {
@@ -658,7 +720,7 @@ def get_all_findings(uid: str = "user_primary"):
 
     return {
         "status": "SUCCESS",
-        "user_id": uid,
+        "user_id": user_id,
         "total_findings_count": total_count,
         "total_potential_savings": round(total_savings, 2),
         "savings_breakdown": {
@@ -675,55 +737,76 @@ def get_all_findings(uid: str = "user_primary"):
     }
 
 @app.get("/api/parent-exposure")
-def get_parent_exposure_endpoint(uid: str = "user_primary"):
+def get_parent_exposure_endpoint(
+    uid: Optional[str] = None,
+    current_user: User = Depends(get_current_user)
+):
     """
     Returns parent conglomerate annual exposure reconciling with portfolio total.
     """
+    user_id = str(current_user.id)
     return {
         "status": "SUCCESS",
-        "user_id": uid,
-        "exposure": neo4j_graph.get_parent_exposure(uid=uid)
+        "user_id": user_id,
+        "exposure": neo4j_graph.get_parent_exposure(uid=user_id)
     }
 
 @app.get("/api/price-hikes")
-def get_price_hikes_endpoint(uid: str = "user_primary"):
+def get_price_hikes_endpoint(
+    uid: Optional[str] = None,
+    current_user: User = Depends(get_current_user)
+):
     """
     Returns detected price revisions at mandate, merchant, or parent level.
     """
+    user_id = str(current_user.id)
     return {
         "status": "SUCCESS",
-        "user_id": uid,
-        "hikes": neo4j_graph.detect_price_hikes(uid=uid)
+        "user_id": user_id,
+        "hikes": neo4j_graph.detect_price_hikes(uid=user_id)
     }
 
 @app.get("/api/duplicate-mandates")
-def get_duplicate_mandates_endpoint(uid: str = "user_primary"):
+def get_duplicate_mandates_endpoint(
+    uid: Optional[str] = None,
+    current_user: User = Depends(get_current_user)
+):
     """
     Returns duplicate mandates (same account or across accounts).
     """
+    user_id = str(current_user.id)
     return {
         "status": "SUCCESS",
-        "user_id": uid,
-        "duplicates": neo4j_graph.detect_duplicate_mandates(uid=uid)
+        "user_id": user_id,
+        "duplicates": neo4j_graph.detect_duplicate_mandates(uid=user_id)
     }
 
 @app.get("/api/post-cancellation-audit")
-def get_post_cancellation_audit_endpoint(uid: str = "user_primary", grace_days: int = 3):
+def get_post_cancellation_audit_endpoint(
+    uid: Optional[str] = None,
+    grace_days: int = 3,
+    current_user: User = Depends(get_current_user)
+):
     """
     Read-only detection of post-cancellation charges past grace window.
     """
+    user_id = str(current_user.id)
     return {
         "status": "SUCCESS",
-        "user_id": uid,
-        "charges": neo4j_graph.detect_post_cancellation_charges(uid=uid, grace_days=grace_days)
+        "user_id": user_id,
+        "charges": neo4j_graph.detect_post_cancellation_charges(uid=user_id, grace_days=grace_days)
     }
 
 @app.get("/api/overlaps")
-def get_bundle_overlaps(uid: str = "user_primary"):
+def get_bundle_overlaps(
+    uid: Optional[str] = None,
+    current_user: User = Depends(get_current_user)
+):
     """
     Identifies multi-hop bundle overlaps in Neo4j where one paid service already includes another.
     """
-    overlaps = neo4j_graph.find_bundle_overlaps(uid=uid)
+    user_id = str(current_user.id)
+    overlaps = neo4j_graph.find_bundle_overlaps(uid=user_id)
     total_savings = sum(o.get("potential_annual_saving", 0.0) for o in overlaps)
     return {
         "status": "SUCCESS",
@@ -734,15 +817,24 @@ def get_bundle_overlaps(uid: str = "user_primary"):
 
 @app.post("/api/findings/{finding_id}/decision")
 @app.post("/api/overlaps/decision")
-def record_overlap_decision(finding_id: Optional[str] = None, req: OverlapDecisionRequest = None):
+def record_overlap_decision(
+    finding_id: Optional[str] = None,
+    req: OverlapDecisionRequest = None,
+    current_user: User = Depends(get_current_user)
+):
     """
     Persists user's confirmation of kept vs cancelled mandates into Neo4j graph.
     Creates (:Person)-[:MADE_DECISION]->(:Decision).
     """
     if req is None:
         raise HTTPException(status_code=400, detail="Missing decision payload.")
+    user_id = str(current_user.id)
+    all_mandate_ids = list(req.kept_mandate_ids) + list(req.cancel_mandate_ids)
+    for mid in all_mandate_ids:
+        if not neo4j_graph.user_owns_mandate(user_id, mid):
+            raise HTTPException(status_code=403, detail=f"Forbidden: You do not have permission to modify mandate '{mid}'.")
     res = neo4j_graph.record_overlap_decision(
-        uid=req.user_id or "user_primary",
+        uid=user_id,
         kept_mandate_ids=req.kept_mandate_ids,
         cancel_mandate_ids=req.cancel_mandate_ids,
         finding_key=req.finding_key or finding_id,
@@ -752,68 +844,115 @@ def record_overlap_decision(finding_id: Optional[str] = None, req: OverlapDecisi
     return res
 
 @app.get("/api/mandates")
-def get_mandates_portfolio(uid: str = "user_primary"):
+def get_mandates_portfolio(
+    uid: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """
     Returns user's mandates with graph-tracked lifecycle statuses:
     active, flagged, keep_confirmed, suggested_cancel, marked_cancelled,
     still_charging, verified_cancelled.
+    Strictly scoped to authenticated current_user.
     """
-    nodes = [n for n in neo4j_graph.nodes if n["group"] == "mandate"]
-    portfolio = []
-    for n in nodes:
-        props = n.get("properties", {})
-        portfolio.append(props)
+    user_id = str(current_user.id)
+    portfolio = neo4j_graph.get_user_mandates(user_id)
+    if not portfolio:
+        sql_mandates = db.query(Mandate).filter(Mandate.user_id == user_id).all()
+        if sql_mandates:
+            portfolio = [
+                {
+                    "id": m.id,
+                    "merchant_name": m.merchant_name,
+                    "merchant_id": m.merchant_id,
+                    "descriptor": m.descriptor,
+                    "cadence": m.cadence,
+                    "amount": float(m.latest_amount) if m.latest_amount else 0.0,
+                    "latest_amount": float(m.latest_amount) if m.latest_amount else 0.0,
+                    "annual_committed": float(m.annual_committed_cost) if m.annual_committed_cost else 0.0,
+                    "annual_committed_cost": float(m.annual_committed_cost) if m.annual_committed_cost else 0.0,
+                    "flag": m.flag,
+                    "status": m.status,
+                    "user_id": m.user_id,
+                }
+                for m in sql_mandates
+            ]
     return {
-        "user_id": uid,
+        "user_id": user_id,
         "total_mandates": len(portfolio),
         "mandates": portfolio
     }
 
 @app.post("/api/mandates/{mandate_id}/cancel-confirm")
-def confirm_mandate_cancellation(mandate_id: str, req: Optional[CancelConfirmRequest] = None):
+def confirm_mandate_cancellation(
+    mandate_id: str,
+    req: Optional[CancelConfirmRequest] = None,
+    current_user: User = Depends(get_current_user)
+):
     """
     Records user confirmation that they have cancelled the mandate in their banking/merchant app.
     Lifecycle status moves to 'marked_cancelled'.
     """
-    uid = req.user_id if req and req.user_id else "user_primary"
+    user_id = str(current_user.id)
+    if not neo4j_graph.user_owns_mandate(user_id, mandate_id):
+        raise HTTPException(status_code=403, detail="Forbidden: You do not have permission to modify this mandate.")
     c_date = req.cancel_date if req and req.cancel_date else None
-    res = neo4j_graph.confirm_mandate_cancellation(uid=uid, mandate_id=mandate_id, cancel_date=c_date)
+    res = neo4j_graph.confirm_mandate_cancellation(uid=user_id, mandate_id=mandate_id, cancel_date=c_date)
     return res
 
 @app.post("/api/mandates/{mandate_id}/tags")
-def tag_mandate(mandate_id: str, req: TagRequest):
+def tag_mandate(
+    mandate_id: str,
+    req: TagRequest,
+    current_user: User = Depends(get_current_user)
+):
     """
-    Tags a mandate with user-defined labels (scoped to user_id).
+    Tags a mandate with user-defined labels (scoped to current_user.id).
     """
-    uid = req.user_id or "user_primary"
-    return neo4j_graph.add_mandate_tags(uid=uid, mandate_id=mandate_id, tags=req.tags)
+    user_id = str(current_user.id)
+    if not neo4j_graph.user_owns_mandate(user_id, mandate_id):
+        raise HTTPException(status_code=403, detail="Forbidden: You do not have permission to modify this mandate.")
+    tags = req.tags if hasattr(req, "tags") and req.tags else ([req.tag] if getattr(req, "tag", None) else [])
+    return neo4j_graph.add_mandate_tags(uid=user_id, mandate_id=mandate_id, tags=tags)
 
 @app.get("/api/spend-summary")
-def get_spend_summary(uid: str = "user_primary"):
+def get_spend_summary(
+    uid: Optional[str] = None,
+    current_user: User = Depends(get_current_user)
+):
     """
     Returns recurring spend concentration by Category, Vendor, Account, Tag, Mechanism, and Billing Type.
     """
-    return neo4j_graph.get_spend_concentration(uid=uid)
+    user_id = str(current_user.id)
+    return neo4j_graph.get_spend_concentration(uid=user_id)
 
 @app.get("/api/decision-history")
-def get_decision_history(uid: str = "user_primary"):
+def get_decision_history(
+    uid: Optional[str] = None,
+    current_user: User = Depends(get_current_user)
+):
     """
     Returns history of user decisions on overlaps and mandates.
     """
-    history = neo4j_graph.get_decision_history(uid=uid)
+    user_id = str(current_user.id)
+    history = neo4j_graph.get_decision_history(uid=user_id)
     return {
-        "user_id": uid,
+        "user_id": user_id,
         "total_decisions": len(history),
         "decisions": history
     }
 
 @app.post("/api/reconcile")
-def run_post_cancellation_reconciliation(req: ReconcileRequest):
+def run_post_cancellation_reconciliation(
+    req: ReconcileRequest,
+    current_user: User = Depends(get_current_user)
+):
     """
     Audits new statement charges against cancelled mandates with GRACE_WINDOW_DAYS = 3.
     """
+    user_id = str(current_user.id)
     report = neo4j_graph.reconcile_cancelled_mandates(
-        uid=req.user_id or "user_primary",
+        uid=user_id,
         transactions=req.transactions,
         statement_end_date=req.statement_end_date
     )
@@ -914,21 +1053,37 @@ Sincerely,
         "mechanism": req.mechanism
     }
 
+FORBIDDEN_CYPHER_KEYWORDS = {
+    "CREATE", "MERGE", "SET", "DELETE", "DETACH", "DROP", "REMOVE", "CALL", "LOAD", "FOREACH", "ALTER", "GRANT", "DENY", "REVOKE"
+}
+
 @app.get("/api/graph")
-def get_graph_data(mode: str = "portfolio"):
+def get_graph_data(mode: str = "portfolio", current_user: User = Depends(get_current_user)):
     """Returns nodes and edges for the Neo4j Graph Visualizer."""
-    return neo4j_graph.get_graph_visualization_data(filter_mode=mode)
+    user_id = str(current_user.id)
+    return neo4j_graph.get_graph_visualization_data(filter_mode=mode, uid=user_id)
 
 @app.post("/api/graph/cypher")
-def execute_cypher_query(req: CypherQueryRequest):
-    """Executes a Cypher query on Neo4j (live Aura or embedded engine)."""
-    if not req.query.strip():
+def execute_cypher_query(
+    req: CypherQueryRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """Executes a strictly read-only Cypher query on Neo4j."""
+    query = req.query.strip()
+    if not query:
         raise HTTPException(status_code=400, detail="Cypher query cannot be empty.")
-    return neo4j_graph.run_cypher_query(req.query)
+
+    for kw in FORBIDDEN_CYPHER_KEYWORDS:
+        if re.search(rf"\b{kw}\b", query, re.IGNORECASE):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cypher execution error: Mutation operation '{kw}' is prohibited. Only read-only MATCH...RETURN queries are permitted."
+            )
+    return neo4j_graph.run_cypher_query(query)
 
 @app.get("/api/graph/seed")
-def download_cypher_seed():
-    """Generates and returns the complete Cypher seed script (.cql)."""
+def download_cypher_seed(current_user: User = Depends(get_current_user)):
+    """Generates and returns the complete Cypher seed script (.cql). Protected."""
     script = neo4j_graph.generate_cypher_seed_script()
     return {
         "filename": "mandate_radar_neo4j_seed.cql",
@@ -938,8 +1093,17 @@ def download_cypher_seed():
     }
 
 @app.post("/api/neo4j/connect")
-def connect_neo4j(req: Neo4jConnectRequest):
-    """Connects to live Neo4j Aura or local instance."""
+@app.post("/api/neo4j/connect")
+def connect_neo4j(
+    req: Neo4jConnectRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """Connects to live Neo4j Aura or local instance (Admin only)."""
+    if getattr(current_user, "email", "") != "admin@mandateradar.in" and not getattr(current_user, "is_admin", False):
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden: Database connection configuration is restricted to system administrators."
+        )
     uri_clean = req.uri.strip()
     if not any(uri_clean.startswith(proto) for proto in ("neo4j://", "neo4j+s://", "bolt://", "bolt+s://")):
         raise HTTPException(

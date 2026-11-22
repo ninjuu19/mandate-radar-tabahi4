@@ -98,7 +98,19 @@ def test_ingest_api():
     files = {"file": ("statement.pdf", pdf_bytes, "application/pdf")}
     data = {"password": "HDFC_DOB_1990"}
     
-    response = client.post("/api/v1/ingest/upload-pdf", files=files, data=data)
+    from app.services.auth_service import create_access_token
+    from app.core.db import init_db, get_db
+    from app.models.user import User
+    init_db()
+    session = next(get_db())
+    u = session.query(User).filter(User.id == "test_user_stage2").first()
+    if not u:
+        u = User(id="test_user_stage2", email="test_stage2@example.com", password_hash="hash", full_name="Stage2 User", is_active=True)
+        session.add(u)
+        session.commit()
+    token = create_access_token({"sub": "test_user_stage2", "email": "test_stage2@example.com"})
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.post("/api/v1/ingest/upload-pdf", files=files, data=data, headers=headers)
     assert response.status_code == 200
     res_data = response.json()
     assert res_data["rows_parsed"] == 3
@@ -106,7 +118,7 @@ def test_ingest_api():
     assert "hero_metrics" in res_data
     
     # Test Ingest Logs API
-    logs_res = client.get("/api/v1/ingest/logs")
+    logs_res = client.get("/api/v1/ingest/logs", headers=headers)
     assert logs_res.status_code == 200
     logs = logs_res.json()
     assert len(logs) > 0

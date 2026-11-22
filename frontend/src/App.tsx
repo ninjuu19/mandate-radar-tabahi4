@@ -6,6 +6,7 @@ import { MoneliqLandingPage } from './components/MoneliqLandingPage'
 import { AuthModal } from './components/AuthModal'
 import { DesignSystemShowcase } from './components/DesignSystemShowcase'
 import { SAMPLE_MANDATES, SAMPLE_HERO_METRICS } from './lib/sampleData'
+import { safeFetchJson } from './lib/api'
 import type { GraphNode, GraphEdge } from './components/GraphCanvas'
 import { CheckCircle2, Info } from 'lucide-react'
 
@@ -40,6 +41,33 @@ export default function App() {
       return () => clearTimeout(t)
     }
   }, [toastNotification])
+
+  // Handle 401 Unauthorized / Token Expiration: clear state, return to opening stage, and open login without infinite loop
+  useEffect(() => {
+    const handleUnauthorized = () => {
+      setCurrentUser({
+        id: 'usr_new',
+        name: 'New User',
+        email: '',
+        phone: '',
+        accountLabel: 'Primary Statement',
+        isDemo: false
+      })
+      setMandates([])
+      setHeroMetrics(EMPTY_HERO_METRICS)
+      setStage('opening')
+      setAuthModalMode('signin')
+      setAuthModalOpen(true)
+      setToastNotification('Session expired or authentication required. Please sign in.')
+    }
+
+    window.addEventListener('mandate_radar:unauthorized', handleUnauthorized)
+    window.addEventListener('mandate_radar_auth_expired', handleUnauthorized)
+    return () => {
+      window.removeEventListener('mandate_radar:unauthorized', handleUnauthorized)
+      window.removeEventListener('mandate_radar_auth_expired', handleUnauthorized)
+    }
+  }, [])
 
   // Current User Session (Persisted in localStorage, production-ready)
   const [currentUser, setCurrentUser] = useState<{
@@ -100,8 +128,8 @@ export default function App() {
     if (isDemoAccount(currentUser)) {
       fetchInitialData(currentUser)
     }
-    loadSampleGraph()
-  }, [])
+    loadSampleGraph(currentUser?.name && currentUser.name !== 'New User' ? currentUser.name : 'Rahul Sharma')
+  }, [currentUser?.name])
 
   const fetchInitialData = async (userToFetch = currentUser) => {
     if (!isDemoAccount(userToFetch)) {
@@ -116,7 +144,7 @@ export default function App() {
       if (token) {
         headers['Authorization'] = `Bearer ${token}`
       }
-      const res = await fetch('/api/analyze', {
+      const { ok, data } = await safeFetchJson<any>('/api/analyze', {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -124,8 +152,7 @@ export default function App() {
           user_id: userToFetch.id
         })
       })
-      if (!res.ok) throw new Error('API offline')
-      const data = await res.json()
+      if (!ok || !data) throw new Error('API offline')
       if (data.mandates && data.mandates.length > 0) {
         setMandates(data.mandates)
         setHeroMetrics(data.hero_metrics || SAMPLE_HERO_METRICS)
@@ -173,33 +200,36 @@ export default function App() {
     setToastNotification('Demo portfolio loaded (10 mandates, ₹65,623/year)')
   }
 
-  const loadSampleGraph = () => {
+  const loadSampleGraph = (userName = (currentUser?.name && currentUser.name !== 'New User' ? currentUser.name : 'Rahul Sharma')) => {
     const sampleNodes: GraphNode[] = [
-      { id: 'usr-1', label: 'User', type: 'user', properties: { name: 'Rahul Sharma' } },
-      { id: 'p-alpha', label: 'Alphabet Inc', type: 'parent', properties: { name: 'Alphabet Inc', country: 'US' } },
-      { id: 'p-amz', label: 'Amazon.com Inc', type: 'parent', properties: { name: 'Amazon.com Inc', country: 'US' } },
-      { id: 'p-dis', label: 'Disney', type: 'parent', properties: { name: 'The Walt Disney Co', country: 'US' } },
-      { id: 'p-sp', label: 'Spotify AB', type: 'parent', properties: { name: 'Spotify AB', country: 'SE' } },
-      { id: 'p-nf', label: 'Netflix Inc', type: 'parent', properties: { name: 'Netflix Inc', country: 'US' } },
-      { id: 'm-yt', label: 'YouTube Premium', type: 'merchant', properties: { name: 'YouTube Premium', cost: 2268 } },
-      { id: 'm-sp', label: 'Spotify Premium', type: 'merchant', properties: { name: 'Spotify Premium', cost: 1199 } },
-      { id: 'm-nf', label: 'Netflix', type: 'merchant', properties: { name: 'Netflix', cost: 7788 } },
-      { id: 'm-amz', label: 'Amazon Prime', type: 'merchant', properties: { name: 'Amazon Prime', cost: 1499 } },
-      { id: 'r-card', label: 'CARD_SI', type: 'rail', properties: { name: 'Card Standing Instruction' } },
-      { id: 'r-upi', label: 'UPI_AUTOPAY', type: 'rail', properties: { name: 'UPI Autopay' } }
+      { id: 'usr-1', label: 'Account Holder', name: userName, type: 'person', group: 'person', properties: { name: userName, role: 'Account Holder', cost: 12754, count: 4 } },
+      { id: 'p-alpha', label: 'Alphabet Inc', name: 'Alphabet Inc', type: 'parent', group: 'parent', properties: { name: 'Alphabet Inc', country: 'US', cost: 2268 } },
+      { id: 'p-amz', label: 'Amazon.com Inc', name: 'Amazon.com Inc', type: 'parent', group: 'parent', properties: { name: 'Amazon.com Inc', country: 'US', cost: 1499 } },
+      { id: 'p-dis', label: 'The Walt Disney Co', name: 'The Walt Disney Co', type: 'parent', group: 'parent', properties: { name: 'The Walt Disney Co', country: 'US', cost: 1499 } },
+      { id: 'p-sp', label: 'Spotify AB', name: 'Spotify AB', type: 'parent', group: 'parent', properties: { name: 'Spotify AB', country: 'SE', cost: 1199 } },
+      { id: 'p-nf', label: 'Netflix Inc', name: 'Netflix Inc', type: 'parent', group: 'parent', properties: { name: 'Netflix Inc', country: 'US', cost: 7788 } },
+      { id: 'm-yt', label: 'YouTube Premium', name: 'YouTube Premium', type: 'merchant', group: 'merchant', properties: { name: 'YouTube Premium', cost: 2268, amount: 189, cadence: 'MONTHLY', flag: 'HEALTHY', category: 'Video & Music', rail: 'PLAY_STORE', hasOverlap: true, overlapWith: 'Spotify Premium Individual', overlapSavings: 1199 } },
+      { id: 'm-sp', label: 'Spotify Premium Individual', name: 'Spotify Premium Individual', type: 'merchant', group: 'merchant', properties: { name: 'Spotify Premium Individual', cost: 1199, amount: 999, cadence: 'ANNUAL', flag: 'PRICE_HIKE', category: 'Audio Streaming', rail: 'UPI_AUTOPAY', hasOverlap: true, overlapWith: 'YouTube Premium Family', overlapSavings: 1199 } },
+      { id: 'm-nf', label: 'Netflix Standard (HD)', name: 'Netflix Standard (HD)', type: 'merchant', group: 'merchant', properties: { name: 'Netflix Standard (HD)', cost: 7788, amount: 649, cadence: 'MONTHLY', flag: 'UNUSED_ZOMBIE', category: 'Video Streaming', rail: 'CARD_SI', hasOverlap: true, overlapWith: 'Amazon Prime Annual', overlapSavings: 1499 } },
+      { id: 'm-amz', label: 'Amazon Prime Annual', name: 'Amazon Prime Annual', type: 'merchant', group: 'merchant', properties: { name: 'Amazon Prime Annual', cost: 1499, amount: 1499, cadence: 'ANNUAL', flag: 'HEALTHY', category: 'Video & Delivery', rail: 'CARD_SI', hasOverlap: true, overlapWith: 'Netflix Standard (HD)', overlapSavings: 1499 } },
+      { id: 'r-card', label: 'CARD_SI', name: 'Card Standing Instruction', type: 'rail', group: 'rail', properties: { name: 'Card Standing Instruction (ICICI Coral)' } },
+      { id: 'r-upi', label: 'UPI_AUTOPAY', name: 'UPI AutoPay', type: 'rail', group: 'rail', properties: { name: 'UPI Autopay (HDFC Bank)' } }
     ]
     const sampleEdges: GraphEdge[] = [
-      { id: 'e1', source: 'usr-1', target: 'm-yt', type: 'COMMITTED_TO', properties: { amount: 189 } },
-      { id: 'e2', source: 'usr-1', target: 'm-sp', type: 'COMMITTED_TO', properties: { amount: 1199 } },
-      { id: 'e3', source: 'usr-1', target: 'm-nf', type: 'COMMITTED_TO', properties: { amount: 649 } },
-      { id: 'e4', source: 'm-yt', target: 'p-alpha', type: 'OWNED_BY', properties: {} },
-      { id: 'e5', source: 'm-amz', target: 'p-amz', type: 'OWNED_BY', properties: {} },
-      { id: 'e6', source: 'm-sp', target: 'p-sp', type: 'OWNED_BY', properties: {} },
-      { id: 'e7', source: 'm-nf', target: 'p-nf', type: 'OWNED_BY', properties: {} },
-      { id: 'e8', source: 'm-sp', target: 'r-upi', type: 'ROUTED_VIA', properties: {} },
-      { id: 'e9', source: 'm-nf', target: 'r-card', type: 'ROUTED_VIA', properties: {} }
+      { id: 'e1', source: 'usr-1', target: 'm-yt', type: 'COMMITTED_TO', label: '₹189/mo', properties: { amount: 189, cadence: 'MONTHLY' } },
+      { id: 'e2', source: 'usr-1', target: 'm-sp', type: 'COMMITTED_TO', label: '₹999/yr', properties: { amount: 999, cadence: 'ANNUAL' } },
+      { id: 'e3', source: 'usr-1', target: 'm-nf', type: 'COMMITTED_TO', label: '₹649/mo', properties: { amount: 649, cadence: 'MONTHLY' } },
+      { id: 'e10', source: 'usr-1', target: 'm-amz', type: 'COMMITTED_TO', label: '₹1,499/yr', properties: { amount: 1499, cadence: 'ANNUAL' } },
+      { id: 'e4', source: 'm-yt', target: 'p-alpha', type: 'OWNED_BY', label: 'OWNED_BY', properties: {} },
+      { id: 'e5', source: 'm-amz', target: 'p-amz', type: 'OWNED_BY', label: 'OWNED_BY', properties: {} },
+      { id: 'e6', source: 'm-sp', target: 'p-sp', type: 'OWNED_BY', label: 'OWNED_BY', properties: {} },
+      { id: 'e7', source: 'm-nf', target: 'p-nf', type: 'OWNED_BY', label: 'OWNED_BY', properties: {} },
+      { id: 'e8', source: 'm-sp', target: 'r-upi', type: 'ROUTED_VIA', label: 'ROUTED_VIA', properties: {} },
+      { id: 'e9', source: 'm-nf', target: 'r-card', type: 'ROUTED_VIA', label: 'ROUTED_VIA', properties: {} },
+      { id: 'e-ov1', source: 'm-sp', target: 'm-yt', type: 'OVERLAPS_WITH', label: 'OVERLAP: Save ₹1,199', properties: { category: 'Music Streaming', savings: 1199, reason: 'Duplicate Music Streaming: YouTube Premium includes YouTube Music' } },
+      { id: 'e-ov2', source: 'm-nf', target: 'm-amz', type: 'OVERLAPS_WITH', label: 'OVERLAP: Save ₹1,499', properties: { category: 'Video Streaming', savings: 1499, reason: 'Redundant OTT Video Subscriptions: High catalog overlap' } }
     ]
-    setGraphData({ nodes: sampleNodes, edges: sampleEdges, stats: { merchant_count: 10, parent_count: 6 } })
+    setGraphData({ nodes: sampleNodes, edges: sampleEdges, stats: { merchant_count: 4, parent_count: 5 } })
   }
 
   const toggleCancel = (id: string) => {

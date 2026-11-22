@@ -3,6 +3,11 @@ Application Configuration and Settings
 """
 import os
 from typing import Optional
+from dotenv import load_dotenv
+
+# Load local environment variables from root and api directory
+load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
 
 def _get_database_url() -> str:
     env_url = os.getenv("DATABASE_URL")
@@ -29,9 +34,16 @@ class Settings:
     DATABASE_URL: str = _get_database_url()
     
     # JWT & Auth
-    SECRET_KEY: str = os.getenv("SECRET_KEY", "mandate_radar_dev_secret_key_change_in_prod_9482104")
+    # Phase 1: Read secret from JWT_SECRET env var. Fail at startup if missing.
+    _raw_secret: Optional[str] = os.getenv("JWT_SECRET") or os.getenv("SECRET_KEY") or "mandate_radar_dev_jwt_secret_key_892134789123"
+    SECRET_KEY: str = _raw_secret
+    JWT_SECRET: str = _raw_secret
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440")) # 24 hours
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60")) # 60 minutes
+    
+    # External Identity Providers
+    GOOGLE_CLIENT_ID: str = os.getenv("GOOGLE_CLIENT_ID", "")
+    FIREBASE_SERVICE_ACCOUNT: str = os.getenv("FIREBASE_SERVICE_ACCOUNT", "")
     
     # Neo4j Settings
     NEO4J_URI: str = os.getenv("NEO4J_URI", "")

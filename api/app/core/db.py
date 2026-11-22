@@ -30,5 +30,14 @@ def get_db():
 
 def init_db():
     """Initializes all registered SQLAlchemy models in the target database."""
+    import app.models  # noqa: F401 - ensure all models are registered on Base.metadata
     Base.metadata.create_all(bind=engine)
+    # Safe SQLite migration for phone column if table already existed
+    try:
+        with engine.connect() as conn:
+            from sqlalchemy import text
+            conn.execute(text("ALTER TABLE users ADD COLUMN phone VARCHAR(32);"))
+            conn.commit()
+    except Exception:
+        pass
 

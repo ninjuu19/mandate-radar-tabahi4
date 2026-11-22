@@ -59,6 +59,10 @@ class Neo4jKnowledgeGraph:
             self.driver.verify_connectivity()
             self.is_connected = True
             self.connection_error = None
+            try:
+                self.seed_bundle_reference_graph()
+            except Exception as se:
+                print(f"Auto-seed warning on connect: {se}")
             return True, "Successfully connected to Neo4j instance!"
         except Exception as e:
             self.is_connected = False
@@ -320,67 +324,98 @@ class Neo4jKnowledgeGraph:
         """Seeds curated bundle relationships, plans, and capabilities into live Neo4j Aura."""
         if not (self.is_connected and self.driver):
             return False, "Not connected to live Neo4j instance."
-        cypher = """
-        // 1. Constraints & Unique Indexes
-        CREATE CONSTRAINT unique_merchant_id IF NOT EXISTS FOR (m:Merchant) REQUIRE m.id IS UNIQUE;
-        CREATE CONSTRAINT unique_plan_id IF NOT EXISTS FOR (p:Plan) REQUIRE p.id IS UNIQUE;
-        CREATE CONSTRAINT unique_cap_id IF NOT EXISTS FOR (c:Capability) REQUIRE c.id IS UNIQUE;
-        CREATE CONSTRAINT unique_mandate_id IF NOT EXISTS FOR (mand:Mandate) REQUIRE mand.id IS UNIQUE;
-        CREATE CONSTRAINT unique_decision_key IF NOT EXISTS FOR (d:Decision) REQUIRE d.finding_key IS UNIQUE;
-        CREATE CONSTRAINT unique_narration IF NOT EXISTS FOR (n:Narration) REQUIRE n.normalized IS UNIQUE;
-        CREATE CONSTRAINT unique_pricechange IF NOT EXISTS FOR (pc:PriceChange) REQUIRE pc.id IS UNIQUE;
-        CREATE INDEX merchant_norm IF NOT EXISTS FOR (m:Merchant) ON (m.normalizedName);
-        CREATE INDEX charge_date IF NOT EXISTS FOR (c:Charge) ON (c.date);
-        CREATE INDEX mandate_status IF NOT EXISTS FOR (m:Mandate) ON (m.status);
-
-        // 2. Capabilities
-        UNWIND $capabilities AS c
-        MERGE (cap:Capability {id: c.id})
-          ON CREATE SET cap.name = c.name, cap.category = c.category, cap.description = c.description;
-
-        // 3. Plans & Offers
-        UNWIND $plans AS pl
-        MERGE (plan:Plan {id: pl.id})
-          ON CREATE SET plan.name = pl.name, plan.tier = pl.tier, plan.monthly_cost = pl.monthly_cost, plan.annual_cost = pl.annual_cost
-        WITH pl, plan
-        MATCH (v:Merchant {id: pl.vendor_id})
-        MERGE (v)-[:OFFERS]->(plan);
-
-        // 4. Bundle Inclusions
-        UNWIND $bundles AS b
-        MATCH (plan:Plan {id: b.parent_plan_id}), (c:Merchant {id: b.child_vendor_id})
-        MERGE (plan)-[r:INCLUDES]->(c)
-        SET r.tier = b.tier, r.confidence = b.confidence, r.verified_on = date(b.verified_on), r.source_url = b.source_url, r.notes = b.notes
-        WITH b
-        MATCH (p:Merchant {id: b.parent_vendor_id}), (c:Merchant {id: b.child_vendor_id})
-        MERGE (p)-[r2:INCLUDES]->(c)
-        SET r2.tier = b.tier, r2.confidence = b.confidence, r2.verified_on = date(b.verified_on), r2.source_url = b.source_url, r2.notes = b.notes;
-
-        // 5. Vendor Capabilities
-        UNWIND $vendor_caps AS vc
-        MATCH (v:Merchant {id: vc.vendor_id}), (cap:Capability {id: vc.capability_id})
-        MERGE (v)-[r:PROVIDES]->(cap)
-        SET r.confidence = vc.confidence, r.verified_on = date(vc.verified_on), r.source_url = vc.source_url, r.notes = vc.notes;
-
-        // 6. Reference Price Change for Tariff Revision
-        MERGE (pc:PriceChange {id: 'pc_streamplus_2026'})
-        ON CREATE SET pc.effectiveDate = '2026-02-01', pc.oldAmount = 999.0, pc.newAmount = 1299.0, pc.pct = 30.0, pc.source = '2026 Annual Tariff Revision'
-        WITH pc
-        MATCH (m:Merchant {id: 'streamplus'})
-        MERGE (pc)-[:AFFECTS]->(m);
-        """
+        statements = [
+            ("CREATE CONSTRAINT unique_merchant_id IF NOT EXISTS FOR (m:Merchant) REQUIRE m.id IS UNIQUE", {}),
+            ("CREATE CONSTRAINT unique_plan_id IF NOT EXISTS FOR (p:Plan) REQUIRE p.id IS UNIQUE", {}),
+            ("CREATE CONSTRAINT unique_cap_id IF NOT EXISTS FOR (c:Capability) REQUIRE c.id IS UNIQUE", {}),
+            ("CREATE CONSTRAINT unique_mandate_id IF NOT EXISTS FOR (mand:Mandate) REQUIRE mand.id IS UNIQUE", {}),
+            ("CREATE CONSTRAINT unique_decision_key IF NOT EXISTS FOR (d:Decision) REQUIRE d.finding_key IS UNIQUE", {}),
+            ("CREATE CONSTRAINT unique_narration IF NOT EXISTS FOR (n:Narration) REQUIRE n.normalized IS UNIQUE", {}),
+            ("CREATE CONSTRAINT unique_pricechange IF NOT EXISTS FOR (pc:PriceChange) REQUIRE pc.id IS UNIQUE", {}),
+            ("CREATE INDEX merchant_norm IF NOT EXISTS FOR (m:Merchant) ON (m.normalizedName)", {}),
+            ("CREATE INDEX charge_date IF NOT EXISTS FOR (c:Charge) ON (c.date)", {}),
+            ("CREATE INDEX mandate_status IF NOT EXISTS FOR (m:Mandate) ON (m.status)", {}),
+            (
+                """UNWIND $capabilities AS c
+                MERGE (cap:Capability {id: c.id})
+                  ON CREATE SET cap.name = c.name, cap.category = c.category, cap.description = c.description""",
+                {"capabilities": CAPABILITIES}
+            ),
+            (
+                """UNWIND $plans AS pl
+                MERGE (plan:Plan {id: pl.id})
+                  ON CREATE SET plan.name = pl.name, plan.tier = pl.tier, plan.monthly_cost = pl.monthly_cost, plan.annual_cost = pl.annual_cost
+                WITH pl, plan
+                MERGE (v:Merchant {id: pl.vendor_id})
+                MERGE (v)-[:OFFERS]->(plan)""",
+                {"plans": PLANS}
+            ),
+            (
+                """UNWIND $bundles AS b
+                MERGE (plan:Plan {id: b.parent_plan_id})
+                MERGE (c:Merchant {id: b.child_vendor_id})
+                MERGE (plan)-[r:INCLUDES]->(c)
+                SET r.tier = b.tier, r.confidence = b.confidence, r.source_url = b.source_url, r.notes = b.notes
+                WITH b
+                MERGE (p:Merchant {id: b.parent_vendor_id})
+                MERGE (c2:Merchant {id: b.child_vendor_id})
+                MERGE (p)-[r2:INCLUDES]->(c2)
+                SET r2.tier = b.tier, r2.confidence = b.confidence, r2.source_url = b.source_url, r2.notes = b.notes""",
+                {"bundles": CURATED_BUNDLES}
+            ),
+            (
+                """UNWIND $vendor_caps AS vc
+                MERGE (v:Merchant {id: vc.vendor_id})
+                MERGE (cap:Capability {id: vc.capability_id})
+                MERGE (v)-[r:PROVIDES]->(cap)
+                SET r.confidence = vc.confidence, r.source_url = vc.source_url, r.notes = vc.notes""",
+                {"vendor_caps": VENDOR_CAPABILITIES}
+            ),
+            (
+                """MERGE (pc:PriceChange {id: 'pc_streamplus_2026'})
+                ON CREATE SET pc.effectiveDate = '2026-02-01', pc.oldAmount = 999.0, pc.newAmount = 1299.0, pc.pct = 30.0, pc.source = '2026 Annual Tariff Revision'
+                WITH pc
+                MERGE (m:Merchant {id: 'streamplus'})
+                MERGE (pc)-[:AFFECTS]->(m)""",
+                {}
+            )
+        ]
         try:
             with self.driver.session() as session:
-                session.run(
-                    cypher,
-                    capabilities=CAPABILITIES,
-                    plans=PLANS,
-                    bundles=CURATED_BUNDLES,
-                    vendor_caps=VENDOR_CAPABILITIES
-                )
+                for stmt, params in statements:
+                    session.run(stmt, **params)
                 return True, "Successfully seeded reference graph (Capabilities, Plans, Inclusions, and Provides) into Neo4j Aura."
         except Exception as e:
             return False, f"Failed to seed reference graph into Neo4j Aura: {str(e)}"
+
+    def _get_user_mandate_nodes(self, uid: str) -> List[Dict[str, Any]]:
+        """Returns mandate nodes belonging to a specific user (isolated tenant)."""
+        user_mandate_ids = {
+            e["target"] for e in self.edges
+            if e.get("source") == uid and e.get("type") == "HAS_MANDATE"
+        }
+        return [
+            n for n in self.nodes
+            if n.get("group") == "mandate" and (
+                n["id"] in user_mandate_ids
+                or n.get("properties", {}).get("user_id") == uid
+                or n.get("properties", {}).get("person_id") == uid
+            )
+        ]
+
+    def user_owns_mandate(self, uid: str, mandate_id: str) -> bool:
+        """Verifies if the specified mandate belongs to the given user."""
+        clean_mid = str(mandate_id).replace("mand_", "")
+        user_mandates = self._get_user_mandate_nodes(uid)
+        for n in user_mandates:
+            mid = str(n.get("properties", {}).get("id") or n["id"].replace("mand_", ""))
+            if mid == clean_mid or n["id"] == f"mand_{clean_mid}":
+                return True
+        return False
+
+    def get_user_mandates(self, uid: str) -> List[Dict[str, Any]]:
+        """Returns properties of all mandates belonging to the given user."""
+        return [n.get("properties", {}) for n in self._get_user_mandate_nodes(uid)]
 
     def sync_statement_mandates(self, person_name: str, mandates: List[Dict[str, Any]], person_id: str = "user_primary", account_label: str = "Primary Account"):
         """
@@ -396,26 +431,52 @@ class Neo4jKnowledgeGraph:
         preserved_mandates = []
         incoming_ids = {m["id"] for m in mandates}
 
-        for n in self.nodes:
-            if n.get("label") == "Mandate":
-                p = n.get("properties", {})
-                mid = p.get("id") or n["id"].replace("mand_", "")
-                existing_mandate_states[mid] = {
-                    "status": p.get("status", "active"),
-                    "cancel_confirmed_at": p.get("cancel_confirmed_at"),
-                    "last_seen_charge_date": p.get("last_seen_charge_date"),
-                    "expected_next_charge_date": p.get("expected_next_charge_date"),
-                    "reminder_count": p.get("reminder_count", 0),
-                    "tags": p.get("tags", []),
-                    "billing_type": p.get("billing_type", "fixed"),
-                    "account_label": p.get("account_label", account_label)
-                }
-                if mid not in incoming_ids and p.get("status") in ["marked_cancelled", "cancel_confirmed_by_user", "still_charging", "verified_cancelled"]:
-                    preserved_mandates.append(dict(p))
+        # Check existing mandate states scoped to this user
+        user_existing_mandates = self._get_user_mandate_nodes(person_id)
+        for n in user_existing_mandates:
+            p = n.get("properties", {})
+            mid = p.get("id") or n["id"].replace("mand_", "")
+            existing_mandate_states[mid] = {
+                "status": p.get("status", "active"),
+                "cancel_confirmed_at": p.get("cancel_confirmed_at"),
+                "last_seen_charge_date": p.get("last_seen_charge_date"),
+                "expected_next_charge_date": p.get("expected_next_charge_date"),
+                "reminder_count": p.get("reminder_count", 0),
+                "tags": p.get("tags", []),
+                "billing_type": p.get("billing_type", "fixed"),
+                "account_label": p.get("account_label", account_label)
+            }
+            if mid not in incoming_ids and p.get("status") in ["marked_cancelled", "cancel_confirmed_by_user", "still_charging", "verified_cancelled"]:
+                preserved_mandates.append(dict(p))
 
-        # Remove old statement nodes if re-analyzing, keeping reference & overlap edges
-        self.nodes = [n for n in self.nodes if n["group"] not in ["person", "mandate", "charge", "account"]]
-        self.edges = [e for e in self.edges if e["type"] not in ["HAS_MANDATE", "FOR", "VIA_MECHANISM", "HAD_CHARGE", "DECIDED_OVERLAP", "OWNS_ACCOUNT", "PAID_FROM", "TAGGED"]]
+        # Remove only THIS user's previous statement nodes if re-analyzing
+        user_node_ids_to_remove = set()
+        for e in self.edges:
+            if e.get("source") == person_id:
+                user_node_ids_to_remove.add(e.get("target"))
+        for e in self.edges:
+            if e.get("source") in user_node_ids_to_remove and e.get("type") in ["HAD_CHARGE", "HAS_CHARGE"]:
+                user_node_ids_to_remove.add(e.get("target"))
+
+        self.nodes = [
+            n for n in self.nodes 
+            if not (
+                (n.get("group") == "person" and n.get("id") == person_id)
+                or (n.get("group") in ["mandate", "charge", "account"] and (
+                    n.get("properties", {}).get("user_id") == person_id
+                    or n.get("properties", {}).get("person_id") == person_id
+                    or n["id"] in user_node_ids_to_remove
+                ))
+            )
+        ]
+        self.edges = [
+            e for e in self.edges 
+            if not (
+                e.get("source") == person_id 
+                or e.get("source") in user_node_ids_to_remove
+                or e.get("target") in user_node_ids_to_remove
+            )
+        ]
 
         self.nodes.append({
             "id": person_id,
@@ -438,9 +499,13 @@ class Neo4jKnowledgeGraph:
             raw_id = mand["id"]
             mand_node_id = f"mand_{raw_id}"
             
-            # Restore state if previously confirmed
+            # Restore state if previously confirmed or reconciled
             prev_state = existing_mandate_states.get(raw_id, {})
-            current_status = mand.get("status") or prev_state.get("status") or "active"
+            prev_status = prev_state.get("status")
+            if prev_status and prev_status in ["marked_cancelled", "cancel_confirmed_by_user", "still_charging", "verified_cancelled", "keep_confirmed", "suggested_cancel"]:
+                current_status = prev_status
+            else:
+                current_status = mand.get("status") or prev_status or "active"
             cancel_confirmed_at = mand.get("cancel_confirmed_at") or prev_state.get("cancel_confirmed_at")
             last_seen_charge = mand.get("last_seen_charge_date") or prev_state.get("last_seen_charge_date") or mand.get("last_charged")
             reminder_cnt = mand.get("reminder_count") if mand.get("reminder_count") is not None else prev_state.get("reminder_count", 0)
@@ -510,6 +575,8 @@ class Neo4jKnowledgeGraph:
                 "val": 22,
                 "properties": {
                     "id": raw_id,
+                    "user_id": person_id,
+                    "person_id": person_id,
                     "status": current_status,
                     "cadence": m_cad,
                     "cyclesPerYear": m_cycles,
@@ -654,7 +721,8 @@ class Neo4jKnowledgeGraph:
                             "id": c_hash,
                             "date": c_date,
                             "amount": float(amt_str),
-                            "descriptor": c_desc
+                            "descriptor": c_desc,
+                            "user_id": person_id
                         }
                     })
 
@@ -747,6 +815,7 @@ class Neo4jKnowledgeGraph:
                 "flag_reason": mand.get("flag_reason", ""),
                 "descriptor": mand.get("descriptor", ""),
                 "merchant_id": mand.get("merchant_id"),
+                "merchant_name": mand.get("merchant_name") or mand.get("descriptor") or mand.get("merchant_id"),
                 "mechanism": mand.get("mechanism", "CARD_SI"),
                 "expected_next_charge_date": expected_next,
                 "cancel_confirmed_at": cancel_confirmed_at,
@@ -789,7 +858,7 @@ class Neo4jKnowledgeGraph:
                 WITH mand, m
                 WHERE m.merchant_id IS NOT NULL
                 MERGE (merch:Merchant {id: m.merchant_id})
-                SET merch:Vendor
+                SET merch:Vendor, merch.name = coalesce(m.merchant_name, merch.name, m.merchant_id)
                 MERGE (mand)-[:FOR]->(merch)
                 MERGE (mand)-[:CHARGES]->(merch);
                 """
@@ -840,7 +909,7 @@ class Neo4jKnowledgeGraph:
         MATCH path = (a)-[:OFFERS|INCLUDES*1..6]->(b)
         RETURN ma, mb, a, b,
                [n in nodes(path) | coalesce(n.name, n.id)] AS path_names,
-               [r in relationships(path) | {confidence: coalesce(r.confidence, 'confirmed_public'), notes: coalesce(r.notes, ''), source_url: coalesce(r.source_url, 'TODO: fill link'), verified_on: coalesce(str(r.verified_on), DEFAULT_VERIFIED_DATE)}] AS path_rels
+               [r in relationships(path) | {confidence: coalesce(r.confidence, 'confirmed_public'), notes: coalesce(r.notes, ''), source_url: coalesce(r.source_url, 'TODO: fill link'), verified_on: coalesce(toString(r.verified_on), DEFAULT_VERIFIED_DATE)}] AS path_rels
         """
 
         if self.is_connected and self.driver:
@@ -896,10 +965,11 @@ class Neo4jKnowledgeGraph:
             except Exception as e:
                 print(f"Neo4j Aura bundle query failed ({e}); evaluating on embedded graph engine.")
 
-        # Embedded Graph Traversal
+        # Embedded Graph Traversal scoped to uid
+        user_mandates = self._get_user_mandate_nodes(uid)
         mandate_nodes = [
-            n for n in self.nodes 
-            if n["group"] == "mandate" and n.get("properties", {}).get("status", "active") in ["active", "flagged", "flagged_overlap", "keep_confirmed"]
+            n for n in user_mandates 
+            if n.get("properties", {}).get("status", "active") in ["active", "flagged", "flagged_overlap", "keep_confirmed"]
         ]
 
         mandate_to_merchant = {}
@@ -1094,10 +1164,11 @@ class Neo4jKnowledgeGraph:
             except Exception as e:
                 print(f"Neo4j Aura capability query failed ({e}); evaluating on embedded engine.")
 
-        # Embedded Graph Traversal for Capabilities
+        # Embedded Graph Traversal for Capabilities scoped to uid
+        user_mandates = self._get_user_mandate_nodes(uid)
         mandate_nodes = [
-            n for n in self.nodes 
-            if n["group"] == "mandate" and n.get("properties", {}).get("status", "active") in ["active", "flagged", "flagged_overlap", "keep_confirmed"]
+            n for n in user_mandates 
+            if n.get("properties", {}).get("status", "active") in ["active", "flagged", "flagged_overlap", "keep_confirmed"]
         ]
 
         mandate_to_merchant = {}
@@ -1293,10 +1364,11 @@ class Neo4jKnowledgeGraph:
             except Exception as e:
                 print(f"Neo4j Aura duplicate query failed ({e}); evaluating on embedded engine.")
 
-        # Embedded Graph Traversal
+        # Embedded Graph Traversal scoped to uid
+        user_mandates = self._get_user_mandate_nodes(uid)
         mandate_nodes = [
-            n for n in self.nodes 
-            if n["group"] == "mandate" and n.get("properties", {}).get("status", "active") in ["active", "flagged", "flagged_overlap", "keep_confirmed"]
+            n for n in user_mandates 
+            if n.get("properties", {}).get("status", "active") in ["active", "flagged", "flagged_overlap", "keep_confirmed"]
         ]
 
         vendor_groups = {}
@@ -1400,9 +1472,10 @@ class Neo4jKnowledgeGraph:
                 print(f"Live Aura duplicate query deferred: {e}")
 
         # Embedded Graph Traversal
+        user_mandates = self._get_user_mandate_nodes(uid)
         mandate_nodes = [
-            n for n in self.nodes
-            if n["group"] == "mandate" and n.get("properties", {}).get("status") in ['active', 'flagged', 'flagged_overlap', 'keep_confirmed', 'suggested_cancel']
+            n for n in user_mandates
+            if n.get("properties", {}).get("status") in ['active', 'flagged', 'flagged_overlap', 'keep_confirmed', 'suggested_cancel']
         ]
         merchant_groups = {}
         for m in mandate_nodes:
@@ -1455,10 +1528,10 @@ class Neo4jKnowledgeGraph:
             try:
                 cypher = """
                 MATCH (:Person {id:$uid})-[:HOLDS]->(:Account)-[:HAS_MANDATE]->(md:Mandate {status:'active'})-[:CHARGES]->(m:Merchant)
-                OPTIONAL MATCH (m)-[:OWNED_BY]->(corp:ParentCorp)
+                OPTIONAL MATCH (m)-[:OWNED_BY]->(corp)
                 MATCH (pc:PriceChange)-[:AFFECTS]->(t)
                 WHERE pc.pct > $min_pct AND (t = md OR t = m OR t = corp)
-                RETURN md.id AS mandateId, m.name AS merchantName, pc.pct AS pct,
+                RETURN md.id AS mandateId, coalesce(m.name, md.merchant_name, 'Merchant') AS merchantName, pc.pct AS pct,
                        coalesce(pc.newAmount - pc.oldAmount, md.amount * pc.pct / 100.0) * coalesce(md.cyclesPerYear, 12) AS extraPerYear;
                 """
                 with self.driver.session() as session:
@@ -1469,9 +1542,10 @@ class Neo4jKnowledgeGraph:
 
         # Embedded Graph Traversal
         hikes = []
+        user_mandates = self._get_user_mandate_nodes(uid)
         mandates = [
-            n for n in self.nodes
-            if n["group"] == "mandate" and n.get("properties", {}).get("status") in ["active", "flagged"]
+            n for n in user_mandates
+            if n.get("properties", {}).get("status") in ["active", "flagged"]
         ]
         price_changes = [n for n in self.nodes if n.get("label") == "PriceChange"]
 
@@ -1533,8 +1607,9 @@ class Neo4jKnowledgeGraph:
             try:
                 cypher = """
                 MATCH (:Person {id:$uid})-[:HOLDS]->(:Account)-[:HAS_MANDATE]->(md:Mandate {status:'active'})-[:CHARGES]->(m:Merchant)
-                OPTIONAL MATCH (m)-[:OWNED_BY]->(corp:ParentCorp)
-                RETURN coalesce(corp.name, m.name) AS owner, collect(DISTINCT m.name) AS services,
+                OPTIONAL MATCH (m)-[:OWNED_BY]->(corp)
+                RETURN coalesce(corp.name, m.name, md.merchant_name, 'Independent') AS owner,
+                       collect(DISTINCT coalesce(m.name, md.merchant_name, m.id)) AS services,
                        sum(md.amount*coalesce(md.cyclesPerYear, 12)) AS annualExposure
                 ORDER BY annualExposure DESC;
                 """
@@ -1545,9 +1620,10 @@ class Neo4jKnowledgeGraph:
                 print(f"Live Aura parent exposure query deferred: {e}")
 
         # Embedded Graph Traversal
+        user_mandates = self._get_user_mandate_nodes(uid)
         active_mands = [
-            n for n in self.nodes
-            if n["group"] == "mandate" and n.get("properties", {}).get("status") in ["active", "flagged", "flagged_overlap", "keep_confirmed"]
+            n for n in user_mandates
+            if n.get("properties", {}).get("status") in ["active", "flagged", "flagged_overlap", "keep_confirmed"]
         ]
         exposure_map = {}
         for md in active_mands:
@@ -1590,21 +1666,32 @@ class Neo4jKnowledgeGraph:
         if self.is_connected and self.driver:
             try:
                 cypher = """
-                MATCH (md:Mandate {status:'marked_cancelled'})-[:HAS_CHARGE]->(c:Charge)
-                WHERE c.date > md.cancellationDate + duration({days:$graceDays})
-                RETURN md.id AS mandateId, c.id AS chargeId, c.date AS chargeDate, c.amount AS amount;
+                MATCH (p:Person {id:$uid})
+                MATCH (p)-[:HAS_MANDATE|HOLDS*1..2]->(md:Mandate)-[:HAS_CHARGE]->(c:Charge)
+                WHERE md.status IN ['marked_cancelled', 'cancel_confirmed_by_user', 'still_charging']
+                  AND date(substring(toString(c.date), 0, 10)) > date(substring(toString(md.cancellationDate), 0, 10)) + duration({days:$graceDays})
+                RETURN DISTINCT md.id AS mandateId, c.id AS chargeId, toString(c.date) AS chargeDate, c.amount AS amount;
                 """
                 with self.driver.session() as session:
-                    res = session.run(cypher, graceDays=grace_days)
-                    return [r.data() for r in res]
+                    res = session.run(cypher, uid=uid, graceDays=grace_days)
+                    seen_pairs = set()
+                    unique_results = []
+                    for r in res:
+                        d = r.data()
+                        pair = (d.get("mandateId"), d.get("chargeId"))
+                        if pair not in seen_pairs:
+                            seen_pairs.add(pair)
+                            unique_results.append(d)
+                    return unique_results
             except Exception as e:
                 print(f"Live Aura post-cancellation query deferred: {e}")
 
         # Embedded Graph Traversal
         flagged = []
+        user_mandates = self._get_user_mandate_nodes(uid)
         cancelled_mands = [
-            n for n in self.nodes
-            if n["group"] == "mandate" and n.get("properties", {}).get("status") in ["marked_cancelled", "cancel_confirmed_by_user", "still_charging"]
+            n for n in user_mandates
+            if n.get("properties", {}).get("status") in ["marked_cancelled", "cancel_confirmed_by_user", "still_charging"]
         ]
 
         for md in cancelled_mands:
@@ -1618,12 +1705,15 @@ class Neo4jKnowledgeGraph:
                 continue
 
             grace_limit = c_date + timedelta(days=grace_days)
+            seen_charges_for_mand = set()
 
-            # Find all charges for this mandate
+            # Find all charges for this mandate using HAS_CHARGE edge (deduplicated)
+            seen_charge_ids = set()
             for e in self.edges:
-                if e["source"] == md["id"] and e["type"] in ["HAD_CHARGE", "HAS_CHARGE"]:
+                if e["source"] == md["id"] and e["type"] == "HAS_CHARGE":
                     ch_node = next((n for n in self.nodes if n["id"] == e["target"]), None)
-                    if ch_node:
+                    if ch_node and ch_node["id"] not in seen_charge_ids:
+                        seen_charge_ids.add(ch_node["id"])
                         ch_props = ch_node.get("properties", {})
                         ch_date_str = str(ch_props.get("date", ""))[:10]
                         try:
@@ -1740,15 +1830,17 @@ class Neo4jKnowledgeGraph:
                 props = n.get("properties", {})
                 mid = str(props.get("id") or n["id"].replace("mand_", ""))
                 if mid == str(mandate_id):
-                    props["status"] = "cancel_confirmed_by_user"
+                    props["status"] = "marked_cancelled"
                     props["cancel_confirmed_at"] = cancel_dt
                     props["reminder_count"] = 0
                     n["color"] = "#6B7280"
+                    cad = str(props.get("cadence", "MONTHLY")).upper()
+                    c_days = 365 if ("YEAR" in cad or "ANNUAL" in cad) else (91 if "QUART" in cad else 30)
+                    last_ch = props.get("last_seen_charge_date")
+                    base_dt_str = str(last_ch or cancel_dt)[:10]
                     try:
-                        c_date_obj = datetime.strptime(str(cancel_dt)[:10], "%Y-%m-%d")
-                        exp_str = props.get("expected_next_charge_date")
-                        if not exp_str or datetime.strptime(str(exp_str)[:10], "%Y-%m-%d") <= c_date_obj:
-                            props["expected_next_charge_date"] = (c_date_obj + timedelta(days=30)).strftime("%Y-%m-%d")
+                        base_dt = datetime.strptime(base_dt_str, "%Y-%m-%d")
+                        props["expected_next_charge_date"] = (base_dt + timedelta(days=c_days)).strftime("%Y-%m-%d")
                     except Exception:
                         pass
 
@@ -1757,7 +1849,7 @@ class Neo4jKnowledgeGraph:
             try:
                 cypher = """
                 MATCH (p:Person {id:$uid})-[:HAS_MANDATE]->(m:Mandate {id: $mid})
-                SET m.status = 'cancel_confirmed_by_user',
+                SET m.status = 'marked_cancelled',
                     m.cancel_confirmed_at = datetime($cancel_dt),
                     m.reminder_count = 0
                 RETURN m;
@@ -1769,7 +1861,7 @@ class Neo4jKnowledgeGraph:
 
         return {
             "mandate_id": mandate_id,
-            "status": "cancel_confirmed_by_user",
+            "status": "marked_cancelled",
             "cancel_confirmed_at": cancel_dt
         }
 
@@ -1792,14 +1884,14 @@ class Neo4jKnowledgeGraph:
             "pending_verification": []
         }
 
-        # Find cancelled mandates in embedded graph
+        # Find cancelled mandates in embedded graph scoped to uid
         cancelled_mandates = []
-        for n in self.nodes:
-            if n["group"] == "mandate":
-                p = n.get("properties", {})
-                status = p.get("status")
-                if status in ["marked_cancelled", "cancel_confirmed_by_user", "still_charging"]:
-                    cancelled_mandates.append(p)
+        user_mandates = self._get_user_mandate_nodes(uid)
+        for n in user_mandates:
+            p = n.get("properties", {})
+            status = p.get("status")
+            if status in ["marked_cancelled", "cancel_confirmed_by_user", "still_charging"]:
+                cancelled_mandates.append(p)
 
         for mand in cancelled_mandates:
             mid = mand.get("id")
@@ -1812,11 +1904,16 @@ class Neo4jKnowledgeGraph:
             except Exception:
                 cancel_dt = now_dt - timedelta(days=30)
 
+            cadence_str = str(mand.get("cadence", "MONTHLY")).upper()
+            cycle_days = 30 if "MONTH" in cadence_str else (90 if "QUART" in cadence_str else 365)
+
             expected_next_str = mand.get("expected_next_charge_date")
             try:
-                expected_next_dt = datetime.strptime(str(expected_next_str)[:10], "%Y-%m-%d") if expected_next_str else cancel_dt + timedelta(days=30)
+                expected_next_dt = datetime.strptime(str(expected_next_str)[:10], "%Y-%m-%d") if expected_next_str else cancel_dt + timedelta(days=cycle_days)
+                if cancel_dt and expected_next_dt > cancel_dt + timedelta(days=cycle_days):
+                    expected_next_dt = cancel_dt + timedelta(days=cycle_days)
             except Exception:
-                expected_next_dt = cancel_dt + timedelta(days=30)
+                expected_next_dt = cancel_dt + timedelta(days=cycle_days)
 
             mand_desc = mand.get("descriptor", "").strip().lower()
             mand_merchant = mand.get("merchant_id", "")
@@ -1964,9 +2061,10 @@ class Neo4jKnowledgeGraph:
         """
         Aggregates recurring spend by Category, Vendor, Account, Tag, Mechanism, and Billing Type.
         """
+        user_mandates = self._get_user_mandate_nodes(uid)
         active_mands = [
-            n.get("properties", {}) for n in self.nodes
-            if n["group"] == "mandate" and n.get("properties", {}).get("status") in ["active", "flagged", "flagged_overlap", "keep_confirmed"]
+            n.get("properties", {}) for n in user_mandates
+            if n.get("properties", {}).get("status") in ["active", "flagged", "flagged_overlap", "keep_confirmed"]
         ]
 
         cat_spend = {}
@@ -2371,7 +2469,7 @@ class Neo4jKnowledgeGraph:
 
         return "\n".join(lines)
 
-    def get_graph_visualization_data(self, filter_mode: str = "portfolio") -> Dict[str, Any]:
+    def get_graph_visualization_data(self, filter_mode: str = "portfolio", uid: Optional[str] = None) -> Dict[str, Any]:
         """
         Returns node/link payload for interactive Graph Visualizer.
         Filters by 'portfolio' (default, user's active mandates), 'alphabet', 'amazon',
@@ -2379,8 +2477,9 @@ class Neo4jKnowledgeGraph:
         """
         if filter_mode == "portfolio":
             # 1. Start with Person and Mandate nodes
-            person_id = "user_primary"
-            portfolio_mandate_ids = {n["id"] for n in self.nodes if n["group"] == "mandate"}
+            person_id = uid or "user_primary"
+            user_mandates = self._get_user_mandate_nodes(person_id)
+            portfolio_mandate_ids = {n["id"] for n in user_mandates}
             active_ids = {person_id}.union(portfolio_mandate_ids)
 
             # 2. Find merchants and rails linked directly to user mandates
